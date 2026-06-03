@@ -26,14 +26,19 @@ fi
 REPO_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
 cd "$REPO_ROOT"
 
-echo ">>> [1/3] Pulling latest demon-public-demo..."
-(
-    cd "$DEMON_PUBLIC_DEMO"
-    git pull --rebase --autostash
-)
+echo ">>> [1/3] Fetching latest demon-public-demo (origin)..."
+# Just fetch — do NOT `git pull` the checked-out branch. That checkout is
+# usually parked on a stale `claude/sync/*` branch, and pulling it (then
+# diffing the working tree) once hid 23 commits of real backend drift.
+# The drift checker reads the reference from `origin/main` directly, so a
+# plain fetch is all we need here.
+git -C "$DEMON_PUBLIC_DEMO" fetch --quiet origin || \
+    echo "    (fetch failed — drift check will use the local origin ref)"
 
 echo
-echo ">>> [2/3] Running protocol drift check..."
+echo ">>> [2/3] Running protocol drift check (vs origin/main)..."
+# The script defaults to --ref origin/main and self-fetches; it reads the
+# reference from that ref, never the working tree.
 python3 scripts/check_protocol_drift.py \
     --demonTD . \
     --demon-public-demo "$DEMON_PUBLIC_DEMO"

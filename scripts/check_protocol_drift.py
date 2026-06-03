@@ -13,11 +13,23 @@ Surface monitored
   `SEAM_FADE_SECONDS`
 * `SessionConfig` fields (do we send all of them?)
 
+Reference freshness
+-------------------
+By DEFAULT the reference protocol files are read from `origin/main` of the
+demon-public-demo checkout (via `git fetch` + `git show origin/main:<path>`),
+NOT from its working tree. This is deliberate: the working tree is often
+parked on a stale `claude/sync/*` feature branch, and reading it once hid
+23 commits of real backend drift behind a false "no drift" result. Override
+the ref with `--ref`, or read the working tree with `--worktree`.
+
 Usage
 -----
     python scripts/check_protocol_drift.py \
         --demonTD <path>            # default: cwd
         --demon-public-demo <path>  # required
+        [--ref origin/main]         # reference git ref (default)
+        [--worktree]                # read reference from working tree instead
+        [--no-fetch]                # skip git fetch before comparing
         [--json]                    # machine-readable output
 
 Exit
@@ -394,15 +406,43 @@ def compute_drift(ts: dict, py: dict) -> list[DriftItem]:
 # Main
 # ---------------------------------------------------------------------------
 
-def _git_short_sha(path: Path) -> str:
+def _git_short_sha(path: Path, ref: str = "HEAD") -> str:
     try:
         out = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--short", "HEAD"],
+            ["git", "-C", str(path), "rev-parse", "--short", ref],
             capture_output=True, text=True, check=True,
         )
         return out.stdout.strip()
     except Exception:
         return "?"
+
+
+def _git_fetch(path: Path) -> bool:
+    """Best-effort `git fetch` so origin/<branch> reflects the true remote.
+    Returns True on success. Never raises — offline is non-fatal (we warn
+    and fall back to whatever the local ref already points at)."""
+    try:
+        subprocess.run(
+            ["git", "-C", str(path), "fetch", "--quiet", "origin"],
+            capture_output=True, text=True, check=True, timeout=60,
+        )
+        return True
+    except Exception as e:
+        print(f"warning: `git fetch` in {path} failed ({e}); comparing "
+              f"against the local ref as-is (may be stale).", file=sys.stderr)
+        return False
+
+
+def _read_ref_file(repo: Path, ref: str, relpath: str) -> str:
+    """Read <relpath> from a git <ref> (e.g. 'origin/main') WITHOUT touching
+    the working tree / current branch. This is what makes drift detection
+    immune to the local checkout sitting on a stale feature branch — the
+    exact trap that once hid 23 commits of backend drift."""
+    out = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{ref}:{relpath}"],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout
 
 
 def main() -> int:
@@ -413,36 +453,104 @@ def main() -> int:
                         help="Path to demon-public-demo checkout")
     parser.add_argument("--json", action="store_true",
                         help="Emit machine-readable JSON instead of text")
+    parser.add_argument(
+        "--ref", default="origin/main",
+        help="Git ref in demon-public-demo to compare against (default: "
+             "origin/main). The reference protocol files are read from THIS "
+             "ref via `git show`, NOT from the working tree — so a local "
+             "checkout sitting on a stale feature branch can't hide drift.")
+    parser.add_argument(
+        "--worktree", action="store_true",
+        help="Read demon-public-demo files from the working tree instead of "
+             "--ref (legacy behavior; only use when diffing uncommitted local "
+             "edits to the reference).")
+    parser.add_argument(
+        "--no-fetch", action="store_true",
+        help="Skip `git fetch` before comparing (default fetches origin so "
+             "--ref reflects the true remote).")
     args = parser.parse_args()
 
     td_root = Path(args.demonTD).resolve()
     dpd_root = Path(args.demon_public_demo).resolve()
 
-    files = {
-        "types_protocol_ts":  dpd_root / "vendor/demon-ui/types/protocol.ts",
-        "engine_protocol_ts": dpd_root / "vendor/demon-ui/engine/protocol.ts",
-        "audio_worklet_js":   dpd_root / "public/audio-worklet.js",
-        "demon_ext_py":       td_root / "src/demon_ext.py",
-        "wire_py":            td_root / "src/wire.py",
+    # demonTD files always come from the local working tree — that's the
+    # code under test (we WANT local changes). demon-public-demo (the
+    # reference) is read from --ref by default.
+    td_files = {
+        "demon_ext_py": td_root / "src/demon_ext.py",
+        "wire_py":      td_root / "src/wire.py",
     }
-    for label, p in files.items():
+    for label, p in td_files.items():
         if not p.is_file():
             print(f"error: missing source file ({label}): {p}", file=sys.stderr)
             return 2
 
+    dpd_rel = {
+        "types_protocol_ts":  "vendor/demon-ui/types/protocol.ts",
+        "engine_protocol_ts": "vendor/demon-ui/engine/protocol.ts",
+        "audio_worklet_js":   "public/audio-worklet.js",
+    }
+
+    if args.worktree:
+        # Legacy: read the reference straight from the working tree.
+        dpd_sha = _git_short_sha(dpd_root)
+        try:
+            dpd_src = {k: (dpd_root / rel).read_text()
+                       for k, rel in dpd_rel.items()}
+        except OSError as e:
+            print(f"error: reading demon-public-demo working tree: {e}",
+                  file=sys.stderr)
+            return 2
+        # Loud warning if the working tree is behind the remote.
+        if not args.no_fetch:
+            _git_fetch(dpd_root)
+        behind = subprocess.run(
+            ["git", "-C", str(dpd_root), "rev-list", "--count",
+             f"HEAD..{args.ref}"],
+            capture_output=True, text=True).stdout.strip()
+        if behind and behind != "0":
+            print(f"warning: demon-public-demo working tree is {behind} "
+                  f"commits behind {args.ref}; --worktree results may be "
+                  f"stale. Drop --worktree to diff {args.ref} directly.",
+                  file=sys.stderr)
+    else:
+        # Default + recommended: read the reference from --ref (origin/main).
+        if not args.no_fetch:
+            _git_fetch(dpd_root)
+        dpd_sha = _git_short_sha(dpd_root, args.ref)
+        if dpd_sha == "?":
+            print(f"error: ref '{args.ref}' not found in {dpd_root}. Use "
+                  f"--ref <branch> or --worktree.", file=sys.stderr)
+            return 2
+        try:
+            dpd_src = {k: _read_ref_file(dpd_root, args.ref, rel)
+                       for k, rel in dpd_rel.items()}
+        except subprocess.CalledProcessError as e:
+            print(f"error: reading {args.ref} from demon-public-demo: "
+                  f"{e.stderr or e}", file=sys.stderr)
+            return 2
+        # Informational: note when the checkout differs from the compared ref.
+        head_sha = _git_short_sha(dpd_root)
+        if head_sha != dpd_sha:
+            print(f"note: comparing against {args.ref} ({dpd_sha}); local "
+                  f"checkout HEAD is {head_sha}. Reference read from the ref, "
+                  f"not the working tree.", file=sys.stderr)
+
     ts = parse_ts_protocol(
-        files["types_protocol_ts"].read_text(),
-        files["engine_protocol_ts"].read_text(),
-        files["audio_worklet_js"].read_text(),
+        dpd_src["types_protocol_ts"],
+        dpd_src["engine_protocol_ts"],
+        dpd_src["audio_worklet_js"],
     )
     py = parse_py_protocol(
-        files["demon_ext_py"].read_text(),
-        files["wire_py"].read_text(),
+        td_files["demon_ext_py"].read_text(),
+        td_files["wire_py"].read_text(),
     )
     drift = compute_drift(ts, py)
 
     report = {
-        "demon_public_demo_sha": _git_short_sha(dpd_root),
+        "demon_public_demo_sha": dpd_sha,
+        "demon_public_demo_ref": (args.ref if not args.worktree
+                                  else "(worktree)"),
         "demonTD_sha": _git_short_sha(td_root),
         "ts_surface": {
             "server_types": sorted(ts["server_types"]),
@@ -469,7 +577,8 @@ def main() -> int:
         print(json.dumps(report, indent=2, sort_keys=False))
     else:
         print(f"== protocol drift report ==")
-        print(f"  demon-public-demo: {report['demon_public_demo_sha']}")
+        print(f"  demon-public-demo: {report['demon_public_demo_sha']} "
+              f"({report['demon_public_demo_ref']})")
         print(f"  demonTD:           {report['demonTD_sha']}")
         print()
         if not drift:
