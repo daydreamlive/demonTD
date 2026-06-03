@@ -5,8 +5,11 @@
 
 TouchDesigner operator for **DEMON** — real-time AI music generation.
 
-Drop a single `.tox` into any TouchDesigner project, point it at a DEMON server,
+Drop the operator into any TouchDesigner project, point it at a DEMON server,
 hit Connect, and you'll hear AI-generated audio playing through your speakers.
+(The `.tox` loads a few bundled Python deps from a `vendor/` folder — grab the
+**`demonTD-vX.Y.Z.zip`** bundle, not the bare `.tox`, and keep them together.
+See [Quick start](#quick-start).)
 Every public DEMON parameter is exposed through native TD parameter pages, and
 the whole thing is scriptable from Python.
 
@@ -39,8 +42,15 @@ the whole thing is scriptable from Python.
 
 ## Quick start
 
-1. Download `demonTD.tox` from the latest [GitHub release](https://github.com/daydreamlive/demonTD/releases).
-2. Drag it into any TouchDesigner project. A Base COMP named `demon` appears.
+1. Download **`demonTD-vX.Y.Z.zip`** (the bundle — **not** the bare
+   `demonTD.tox`) from the latest [GitHub release](https://github.com/daydreamlive/demonTD/releases),
+   and extract it. You'll get `demonTD.tox` next to a `vendor/` folder.
+   **Keep them together** — the operator loads its Python deps
+   (websocket-client, certifi, zstandard, portaudio) from `vendor/` at
+   runtime. If you move the `.tox` away from `vendor/`, the extension
+   fails to load with `ModuleNotFoundError: No module named 'websocket'`.
+2. Drag `demonTD.tox` (from the extracted folder) into any TouchDesigner
+   project. A Base COMP named `demon` appears.
 3. **One-time TD setup:** Edit → Preferences → Audio → Audio Device → **None**.
    This stops TouchDesigner from holding your Mac's audio device, which would
    otherwise prevent our Python audio thread from opening it. (Details in the
@@ -310,6 +320,26 @@ The Session page has a **Debug Logging** toggle (default off). When on:
 
 Off by default so the textport stays usable.
 
+## Troubleshooting: extension won't load / `No module named 'websocket'`
+
+If the textport shows any of:
+
+```
+DAT compile error: /demon/ws_client ... ModuleNotFoundError: No module named 'websocket'
+[demon_ext] zstandard load failed: ModuleNotFoundError: No module named 'zstandard'
+Error retrieving extension for /demon: tdError: Module compilation error.
+```
+
+…you downloaded the **bare `demonTD.tox`** without the `vendor/` folder.
+The operator loads its Python deps from `vendor/` at runtime, so the
+`.tox` needs that folder next to it (or next to your `.toe`).
+
+**Fix:** download **`demonTD-vX.Y.Z.zip`** from the
+[release](https://github.com/daydreamlive/demonTD/releases), extract it,
+keep `demonTD.tox` and `vendor/` in the same folder, and drag the `.tox`
+in from there. (`zstandard` missing on its own is harmless — the operator
+falls back to uncompressed slices — but a missing `websocket` is fatal.)
+
 ## Architecture
 
 ```
@@ -422,8 +452,15 @@ can still import it.
 
 ## Releases
 
-`.tox` artifacts are attached to GitHub releases:
-[demonTD releases](https://github.com/daydreamlive/demonTD/releases).
+Two assets are attached to each [GitHub release](https://github.com/daydreamlive/demonTD/releases):
+
+- **`demonTD-vX.Y.Z.zip`** — the bundle to download. Contains `demonTD.tox`
+  + the `vendor/` folder of Python deps. Extract it and keep the two
+  together (see [Quick start](#quick-start)).
+- `demonTD.tox` — the bare operator, for repo users who already have
+  `vendor/` checked out. **Don't** download this on its own — without
+  `vendor/` next to it the extension fails to load
+  (`ModuleNotFoundError: No module named 'websocket'`).
 
 ## Out of scope (v0.2, deferred to v0.2.x+)
 
