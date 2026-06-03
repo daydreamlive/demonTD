@@ -61,8 +61,10 @@ the whole thing is scriptable from Python.
    - **Direct** (your own pod). Set **Server URL** to your DEMON pod
      (e.g. `ws://81.183.231.113:44105/` for a Vast.ai pod, or
      `ws://127.0.0.1:8765/` for a local pod).
-5. Set **Source Audio File** to any audio file (WAV, MP3, M4A — the operator
-   auto-converts via `afconvert` on Mac).
+5. **Wire your source audio** into the COMP: drop an **Audio File In CHOP**,
+   point its *File* at a WAV/MP3/M4A, and wire it into the `demon` COMP's
+   input. TD decodes the file and demonTD snapshots it on Connect. (There's
+   no file picker on the operator — the wired CHOP *is* the source.)
 6. Pulse **Connect**.
 7. Within ~3 seconds of `initial buffer: 1152000 frames` in the textport,
    you'll hear your source audio looping. After another few seconds, DEMON's
@@ -70,6 +72,42 @@ the whole thing is scriptable from Python.
 8. Change **Prompt** on the Prompt+LoRA page and pulse **Send Prompt**. Move
    **Denoise**, channel gains, etc. — they stream to the server at the 8 ms
    tick.
+
+## Windows install
+
+Tested on **Windows 11 + TouchDesigner 2025.32820**. The flow is the same as
+above, with a few Windows-specific notes:
+
+1. **Download the bundle, not the bare `.tox`.** Grab
+   **`demonTD-vX.Y.Z.zip`** from the
+   [release](https://github.com/daydreamlive/demonTD/releases) and extract it
+   somewhere stable (e.g. `Documents\demonTD\`). **Keep `demonTD.tox` and the
+   `vendor\` folder in the same directory.** The operator loads its Python
+   deps from `vendor\` at runtime; a lone `.tox` fails to load with
+   `ModuleNotFoundError: No module named 'websocket'` (and you'll see
+   `DAT compile error: /demon/ws_client` in the textport). This is the #1
+   Windows install mistake.
+
+2. **Drag `demonTD.tox` in from the extracted folder** (not from Downloads —
+   it needs `vendor\` next to it).
+
+3. **Source audio.** Wire an **Audio File In CHOP** into the `demon` COMP's
+   input (step 5 above). TD itself decodes WAV/MP3/M4A, so no extra tools are
+   needed for the wired-CHOP path. *If* you instead point demonTD at a raw
+   MP3/M4A file directly, conversion needs **`ffmpeg` on your `PATH`**
+   (`afconvert` is macOS-only) — or just use a WAV. Easiest: use the Audio
+   File In CHOP and let TD decode.
+
+4. **Audio output.** "Python Audio Out" plays through the vendored
+   `libportaudio64bit.dll` to your default Windows output device. There is
+   **no** "Preferences → Audio → Audio Device → None" step on Windows (that's
+   macOS-specific). If you hit a PortAudio open error, another app or an
+   Audio Device Out CHOP already owns the output device — close it, pick a
+   different output, or toggle **Python Audio Out** off and wire the COMP's
+   `out` → your own **Audio Device Out CHOP** so TD owns the device instead.
+
+5. Everything else — Hosted/Direct mode, API key, prompts, LoRAs — is
+   identical to macOS.
 
 ## Quick start — Hosted mode
 
@@ -432,8 +470,9 @@ We bundle three things under `vendor/` so users don't need to install anything:
   ship in the same `_sounddevice_data/portaudio-binaries/` directory. The
   cross-platform loader in `src/audio.py` picks the right one at runtime.
 
-The Windows binaries are vendored but **not yet runtime-tested** by the
-maintainer — please open an issue if anything misbehaves on Windows.
+The Windows binaries are vendored and **confirmed working** on Windows 11 +
+TouchDesigner 2025.32820 — please open an issue if anything misbehaves on
+your Windows setup.
 
 ## Development
 

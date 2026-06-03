@@ -67,6 +67,14 @@ harmless (falls back to uncompressed slices); `websocket` missing is fatal.
   `ready` is the continuous `params` stream. `OnTick` sends params every
   tick (not just on change) for exactly this reason. Don't "optimize" it
   back to send-on-change-only.
+- **The WS socket is single-threaded — keep it that way.** `ws_client.py`
+  funnels ALL sends through an outbound queue drained by the recv thread,
+  because Python's `ssl.SSLSocket` is **not safe for concurrent read+write
+  from two threads** (it corrupts → `SSL: BAD_LENGTH` → client-side
+  disconnect with no server error). Never call `ws.send()` / `ws.ping()` /
+  `ws.close()` directly from another thread; enqueue instead. Don't re-add
+  an app-level ping (that was a cross-thread write); the param stream is
+  the keepalive.
 - **`audio_out` cooks only because `frame_exec` force-cooks it**, and at
   audio rate only because of the `audio_clock` Wave CHOP carrier wired to
   its input. Don't remove either, or downstream Audio Analyze breaks.

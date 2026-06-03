@@ -69,6 +69,16 @@ def test_encode_prompt_full():
                    "key": "A minor", "time_signature": "4"}
 
 
+def test_encode_set_interp_method():
+    for path in ("prompt", "timbre", "structure", "feedback"):
+        msg = json.loads(wire.encode_set_interp_method(path, "slerp"))
+        assert msg == {"type": "set_interp_method", "path": path,
+                       "method": "slerp"}
+    lin = json.loads(wire.encode_set_interp_method("prompt", "linear"))
+    assert lin == {"type": "set_interp_method", "path": "prompt",
+                   "method": "linear"}
+
+
 def test_encode_enable_disable_lora():
     on = json.loads(wire.encode_enable_lora("vintage_synth", strength=0.6))
     assert on == {"type": "enable_lora", "id": "vintage_synth", "strength": 0.6}

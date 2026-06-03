@@ -193,6 +193,27 @@ INIT_PARAMS: list[Param] = [
     Param("Fixturename", "fixture_name", "Init", "Str", "init", default="",
           order=110, label="Fixture Name",
           help="Known fixture name for sidecar lookup (BPM/key/latents). Optional."),
+    # Playback-lead tuning (server-side decode buffer). The "lead" is how
+    # far ahead of the live playhead each freshly decoded slice is placed;
+    # the server adapts it to observed per-tick compute. Defaults match
+    # demon-public-demo's config.json. Higher floor = more robust to GPU
+    # contention (screen capture, the WebGPU/visual display, a second
+    # process) at the cost of latency. Sent in SessionConfig at Connect.
+    Param("Leadfloor", "lead_floor_s", "Init", "Float", "init", default=0.25,
+          min=0.0, max=2.0, clamp_min=True, order=120, label="Lead Floor (s)",
+          help="Minimum baseline lead. ~0.05 is snappy on an idle GPU but "
+               "sawtooths under contention; 0.5 reproduces old fixed "
+               "behavior; 0.25 (default) is the midpoint."),
+    Param("Leadceiling", "lead_ceiling_s", "Init", "Float", "init",
+          default=1.35, min=0.1, max=5.0, clamp_min=True, order=122,
+          label="Lead Ceiling (s)",
+          help="Caps how far contention can inflate the lead. Keep >= ~1.1 "
+               "to fully cover rebuild/refit stalls."),
+    Param("Leadreleasetau", "lead_release_tau_s", "Init", "Float", "init",
+          default=1.5, min=0.0, max=10.0, clamp_min=True, order=124,
+          label="Lead Release Tau (s)",
+          help="Decay time-constant for a contention spike — lower releases "
+               "faster. The server clamps it up to Lead Ceiling if set lower."),
 ]
 
 
@@ -242,6 +263,34 @@ PROMPT_LORA_PARAMS: list[Param] = [
           default=0.4, min=0.0, max=1.0, clamp_min=True, clamp_max=True,
           order=60, label="Prompt Blend",
           help="Prompt A vs B blend (0=A, 1=B). Streamed continuously."),
+    # Per-path blend interpolation method (discrete `set_interp_method`).
+    # Controls how each blend sweep interpolates: "slerp" keeps the norm
+    # constant across the sweep (server default); "linear" is a straight
+    # average that dips at the midpoint. Applied immediately on change and
+    # re-pushed on every (re)connect. Mirrors demon-public-demo's
+    # useInterpSync. The four paths match the web client exactly.
+    Param("Interpheader", None, "Prompt+LoRA", "Header", "session",
+          order=62, section_header=True, label="Blend Interpolation"),
+    Param("Interpprompt", None, "Prompt+LoRA", "Menu", "discrete",
+          default="slerp", order=63, label="Prompt Interp",
+          menu_names=("slerp", "linear"),
+          menu_labels=("Slerp (norm-preserving)", "Linear"),
+          help="Interpolation method for the prompt A/B blend."),
+    Param("Interptimbre", None, "Prompt+LoRA", "Menu", "discrete",
+          default="slerp", order=64, label="Timbre Interp",
+          menu_names=("slerp", "linear"),
+          menu_labels=("Slerp (norm-preserving)", "Linear"),
+          help="Interpolation method for the timbre blend."),
+    Param("Interpstructure", None, "Prompt+LoRA", "Menu", "discrete",
+          default="slerp", order=65, label="Structure Interp",
+          menu_names=("slerp", "linear"),
+          menu_labels=("Slerp (norm-preserving)", "Linear"),
+          help="Interpolation method for the structure blend."),
+    Param("Interpfeedback", None, "Prompt+LoRA", "Menu", "discrete",
+          default="slerp", order=66, label="Feedback Interp",
+          menu_names=("slerp", "linear"),
+          menu_labels=("Slerp (norm-preserving)", "Linear"),
+          help="Interpolation method for the feedback blend."),
     Param("Loraheader", None, "Prompt+LoRA", "Header", "session",
           order=70, section_header=True, label="LoRAs"),
     Param("Lorablend", "lora_blend", "Prompt+LoRA", "Float", "continuous",

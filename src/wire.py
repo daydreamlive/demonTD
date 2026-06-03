@@ -144,6 +144,18 @@ def encode_set_prompt_blend(value: float) -> str:
                       separators=(",", ":"))
 
 
+def encode_set_interp_method(path: str, method: str) -> str:
+    """Discrete per-path interpolation-method control.
+
+    `path` is one of prompt/timbre/structure/feedback; `method` is
+    "slerp" (norm-preserving spherical blend, the server default) or
+    "linear". Mirrors demon-public-demo's protocol.ts sendSetInterpMethod
+    — the server applies it immediately, no smoothing/echo channel.
+    """
+    return json.dumps({"type": "set_interp_method", "path": path,
+                       "method": method}, separators=(",", ":"))
+
+
 def encode_enable_lora(id: str, strength: float | None = None) -> str:
     msg: dict[str, Any] = {"type": "enable_lora", "id": id}
     if strength is not None:

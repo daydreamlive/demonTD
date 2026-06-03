@@ -284,6 +284,7 @@ def parse_py_protocol(demon_ext_py: str, wire_py: str) -> dict:
         "set_structure_fixture": "set_structure_fixture",
         "clear_structure_source": "clear_structure_source",
         "swap_source": "swap_source",
+        "set_interp_method": "set_interp_method",
     }
     client_types_we_send: set[str] = set()
     for enc in encoders:

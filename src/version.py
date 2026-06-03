@@ -1,4 +1,4 @@
-"""Single source of truth for the demonTD version string + cloud User-Agent.
+﻿"""Single source of truth for the demonTD version string + cloud User-Agent.
 
 No TouchDesigner or third-party deps — safe to import from the pure HTTP
 modules (queue_client, oauth) in both the TD runtime and unit tests.
@@ -15,5 +15,5 @@ demon_ext.py is the more detailed per-build fingerprint shown in the boot
 log; this is the clean semver advertised on the wire.
 """
 
-DEMON_TD_VERSION = "0.2.11"
+DEMON_TD_VERSION = "0.2.12"
 USER_AGENT = f"DaydreamDEMON-TD/{DEMON_TD_VERSION}"

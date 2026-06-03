@@ -34,6 +34,7 @@ thread via `tdu.Dependency` / `op.cook()` if needed.
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from typing import Callable
@@ -44,6 +45,11 @@ import websocket  # type: ignore[import-not-found]
 
 
 class WSClient:
+    # Socket timeout for the recv loop. Short so the loop wakes ~10×/s to
+    # flush queued outbound sends; large sends temporarily raise it (see
+    # _flush_outbound).
+    _RECV_TIMEOUT = 0.1
+
     def __init__(
         self,
         url: str,
@@ -53,7 +59,7 @@ class WSClient:
         on_close: Callable[[int | None, str | None], None] | None = None,
         log: Callable[[str], None] = print,
         timeout: float = 30.0,
-        ping_interval: float = 25.0,
+        ping_interval: float = 0.0,  # deprecated/ignored; see note below
     ):
         self.url = url
         self._on_open = on_open
@@ -62,18 +68,39 @@ class WSClient:
         self._on_close = on_close
         self._log = log
         self._timeout = timeout
-        # Periodic client-side ping. Defaults to 25 s because cloud
-        # WS termination points (Cloudflare in particular, which fronts
-        # `music.daydream.live`) drop idle connections at ~100 s with no
-        # client-initiated keepalive. 25 s is the same cadence the web
-        # client uses. Set to 0 to disable.
-        self._ping_interval = float(ping_interval)
-        self._last_ping = 0.0
+        # NOTE: app-level WS ping was REMOVED. Python's ssl.SSLSocket is not
+        # safe for simultaneous read+write from two threads, and a ping sent
+        # from a side-task while the recv loop is mid-read corrupted the SSL
+        # record layer (SSL: BAD_LENGTH) → client-side disconnect with no
+        # server error. We now keep the connection alive purely via the
+        # outbound message stream (the param keepalive), exactly like the
+        # browser web client — and ALL sends are funneled onto the single
+        # recv thread (see _outbound), so the socket is only ever touched by
+        # one thread. `ping_interval` is accepted for call-site compat but
+        # ignored.
+
+        # Outbound queue: send_text/send_binary ENQUEUE from any thread; the
+        # recv thread is the ONLY thread that touches the socket (drains this
+        # queue between recvs). Bounded so a stalled socket can't balloon
+        # memory; params are idempotent so dropping the oldest on overflow is
+        # safe.
+        self._outbound: "queue.Queue[tuple[int, bytes | str]]" = queue.Queue(
+            maxsize=512)
+
+        # Diagnostics (read in the close log).
+        self._n_sent = 0
+        self._n_recv = 0
+        self._n_dropped = 0
+        self._connect_t = 0.0
+        self._last_recv_t = 0.0
 
         self._ws: websocket.WebSocket | None = None
         self._thread: threading.Thread | None = None
-        self._send_lock = threading.Lock()
         self._closing = False
+        # Close code the recv thread should use when it tears the socket
+        # down (set by close()). Kept so the actual socket .close() happens
+        # on the recv thread — never concurrently with its recv.
+        self._req_close_code = 1000
 
     # --- state ----------------------------------------------------------------
 
@@ -115,48 +142,43 @@ class WSClient:
             except Exception as e:
                 self._log(f"[ws_client] on_open raised: {e}")
 
-        # Use a shortish socket timeout so the recv loop wakes regularly
-        # and can run the periodic ping side-task without a separate
-        # timer thread. 5 s gives us four ping windows per ping_interval
-        # to detect close vs. send-keepalive.
+        # Short socket timeout so the loop wakes ~10×/s to flush queued
+        # outbound sends (params keepalive etc.). All socket I/O — both
+        # recv AND send — happens ONLY on this thread, so the SSLSocket is
+        # never read and written concurrently.
         try:
-            self._ws.settimeout(5.0)
+            self._ws.settimeout(self._RECV_TIMEOUT)
         except Exception:
             pass
-        self._last_ping = time.monotonic()
+        self._connect_t = time.monotonic()
+        self._last_recv_t = self._connect_t
 
         # Recv loop
         close_code: int | None = None
         close_reason: str | None = None
         try:
             while not self._closing:
-                # Client-initiated keepalive. Cloudflare et al. close idle
-                # TCP connections at ~100 s; the server may not ping us
-                # spontaneously, so we ping out periodically. `ws.ping()`
-                # writes a control frame; the server's pong is consumed
-                # silently by recv_data(control_frame=False) and never
-                # reaches our handler.
-                if self._ping_interval > 0:
-                    now = time.monotonic()
-                    if now - self._last_ping >= self._ping_interval:
-                        try:
-                            with self._send_lock:
-                                self._ws.ping(b"td")
-                            self._last_ping = now
-                        except Exception as e:
-                            close_reason = (
-                                f"ping failed: {type(e).__name__}: {e}"
-                            )
-                            break
+                # 1. Flush all queued outbound sends FIRST (same thread as
+                #    recv → no concurrent SSL read/write). Drain fully so a
+                #    burst of param messages goes out promptly.
+                flush_err = self._flush_outbound()
+                if flush_err is not None:
+                    close_reason = flush_err
+                    break
+                if self._closing:
+                    break
 
+                # 2. Recv (blocks up to the 0.1 s socket timeout).
                 try:
                     opcode, data = self._ws.recv_data(control_frame=False)
+                    self._n_recv += 1
+                    self._last_recv_t = time.monotonic()
                 except websocket.WebSocketConnectionClosedException as e:
                     close_reason = f"closed: {e}"
                     break
                 except websocket.WebSocketTimeoutException:
-                    # Timeout on recv is normal during quiet periods; loop
-                    # back to the top so we can run the ping check.
+                    # Normal during quiet periods; loop back to flush
+                    # outbound + recv again.
                     continue
                 except Exception as e:
                     close_reason = f"recv error: {type(e).__name__}: {e}"
@@ -189,10 +211,22 @@ class WSClient:
             try:
                 if self._ws is not None:
                     close_code = getattr(self._ws, "close_status_code", None)
-                    self._ws.close()
+                    self._ws.close(status=self._req_close_code)
             except Exception:
                 pass
-            self._log(f"[ws_client] closed (code={close_code}, reason={close_reason!r})")
+            # Rich close diagnostics — when the pod logs no error, these
+            # numbers tell us whether WE closed (send fail / corruption)
+            # vs the server, and how alive the link was.
+            now = time.monotonic()
+            uptime = now - self._connect_t if self._connect_t else 0.0
+            since_recv = now - self._last_recv_t if self._last_recv_t else 0.0
+            self._log(
+                f"[ws_client] closed (code={close_code}, "
+                f"reason={close_reason!r}) — uptime={uptime:.1f}s "
+                f"sent={self._n_sent} recv={self._n_recv} "
+                f"dropped={self._n_dropped} since_last_recv={since_recv:.1f}s "
+                f"queued={self._outbound.qsize()}"
+            )
             if self._on_close:
                 try:
                     self._on_close(close_code, close_reason)
@@ -201,43 +235,84 @@ class WSClient:
             self._ws = None
 
     def close(self, code: int = 1000, reason: str = "") -> None:
-        """Close the connection and stop the recv thread."""
+        """Stop the recv thread and close the socket.
+
+        We do NOT touch the socket here — we signal `_closing` and let the
+        recv thread perform the actual `ws.close()` in its finally block,
+        so the SSLSocket is never accessed from two threads at once (the
+        whole point of this client's single-thread-socket design). The recv
+        loop wakes within RECV_TIMEOUT, sees the flag, and closes with
+        `_req_close_code`.
+        """
+        self._req_close_code = code
         self._closing = True
-        ws = self._ws
-        if ws is not None:
-            try:
-                ws.close(status=code, reason=reason.encode("utf-8") if reason else b"")
-            except Exception:
-                pass
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
+        t = self._thread
+        # Don't join from the recv thread itself (e.g. when close() is
+        # reached via the on_close callback) — that raises RuntimeError.
+        if (t is not None and t.is_alive()
+                and threading.current_thread() is not t):
+            t.join(timeout=2.0)
 
     # --- send -----------------------------------------------------------------
+    #
+    # Callers (any thread) ENQUEUE here; the recv thread is the only thread
+    # that touches the socket. Returns True if the message was queued (not
+    # if it was actually written) — real write failures surface via the
+    # recv loop -> on_close. This is what eliminates the concurrent
+    # SSL read/write that was corrupting the connection.
+
+    def _enqueue(self, opcode: int, payload: bytes | str, kind: str) -> bool:
+        if self._closing or self._ws is None:
+            return False
+        try:
+            self._outbound.put_nowait((opcode, payload))
+            return True
+        except queue.Full:
+            # Socket is stalled and the queue backed up. Drop the OLDEST
+            # (params are idempotent — the next snapshot supersedes it)
+            # to make room, so a stall can't OOM or block the caller.
+            self._n_dropped += 1
+            try:
+                self._outbound.get_nowait()
+                self._outbound.put_nowait((opcode, payload))
+                return True
+            except Exception:
+                self._log(f"[ws_client] {kind}: outbound queue full, dropped")
+                return False
 
     def send_text(self, msg: str) -> bool:
-        """Thread-safe text send. Returns True on success."""
-        ws = self._ws
-        if ws is None or not ws.connected:
-            self._log(f"[ws_client] send_text: not connected")
-            return False
-        try:
-            with self._send_lock:
-                ws.send(msg, opcode=websocket.ABNF.OPCODE_TEXT)
-            return True
-        except Exception as e:
-            self._log(f"[ws_client] send_text failed: {type(e).__name__}: {e}")
-            return False
+        """Queue a text frame for the recv thread to send. Returns True if
+        queued."""
+        return self._enqueue(websocket.ABNF.OPCODE_TEXT, msg, "send_text")
 
     def send_binary(self, payload: bytes) -> bool:
-        """Thread-safe binary send. Returns True on success."""
-        ws = self._ws
-        if ws is None or not ws.connected:
-            self._log(f"[ws_client] send_binary: not connected")
-            return False
-        try:
-            with self._send_lock:
-                ws.send(payload, opcode=websocket.ABNF.OPCODE_BINARY)
-            return True
-        except Exception as e:
-            self._log(f"[ws_client] send_binary failed: {type(e).__name__}: {e}")
-            return False
+        """Queue a binary frame for the recv thread to send. Returns True if
+        queued."""
+        return self._enqueue(websocket.ABNF.OPCODE_BINARY, payload,
+                             "send_binary")
+
+    def _flush_outbound(self) -> str | None:
+        """Send every queued outbound frame. Runs ONLY on the recv thread.
+        Returns a close-reason string on write failure, else None."""
+        while True:
+            try:
+                opcode, payload = self._outbound.get_nowait()
+            except queue.Empty:
+                return None
+            try:
+                # The recv loop runs a short socket timeout (RECV_TIMEOUT)
+                # for responsiveness. A send can be large (the multi-MB
+                # initial audio upload) and would spuriously time out at
+                # that short value, so give each write the full timeout,
+                # then restore the short one for the next recv. Same
+                # thread, so no concurrency concern.
+                self._ws.settimeout(self._timeout)
+                self._ws.send(payload, opcode=opcode)
+                self._n_sent += 1
+            except Exception as e:
+                return f"send failed: {type(e).__name__}: {e}"
+            finally:
+                try:
+                    self._ws.settimeout(self._RECV_TIMEOUT)
+                except Exception:
+                    pass

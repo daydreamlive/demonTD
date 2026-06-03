@@ -281,13 +281,22 @@ def eval_curve_linear(pts: list[tuple[float, float]], t: float) -> float:
 
 # Bump this on every meaningful change so the user can confirm at boot
 # which build is actually loaded. Visible on the "DemonExt initialized" line.
-BUILD_MARKER = "v0.2.11-params-keepalive"
+BUILD_MARKER = "v0.2.12-ws-socket-and-protocol-parity"
 
 # Hosted-mode pod failover cap. When a hosted WS opens but never reaches
 # `ready` (1011 keepalive / overloaded pod / etc.), we leave the dead
 # session and re-queue for a DIFFERENT pod. 3 matches the rtmg-vst PR #4
 # value. Reset to 0 on successful `ready` or on Connect.
 MAX_FAILOVER_ATTEMPTS = 3
+
+# Blend-interpolation menu pars → the `path` field of the
+# set_interp_method message. Mirrors demon-public-demo's INTERP_PATHS.
+_INTERP_PAR_TO_PATH = {
+    "Interpprompt":    "prompt",
+    "Interptimbre":    "timbre",
+    "Interpstructure": "structure",
+    "Interpfeedback":  "feedback",
+}
 
 # Manual-override grace window after the user moves a curve-bound param
 # by hand (in seconds). The curve yields for this long so the operator's
@@ -1251,6 +1260,23 @@ class DemonExt:
                 self._apply_mode_visibility(par.eval())
             except Exception as e:
                 self.log(f"OnParChange(Mode) visibility update failed: {e}")
+            return
+
+        # Per-path blend interpolation method — discrete set_interp_method
+        # (slerp/linear). Applied immediately; also re-pushed on `ready`.
+        path = _INTERP_PAR_TO_PATH.get(name)
+        if path is not None:
+            if self._connected:
+                try:
+                    method = str(par.eval())
+                except Exception:
+                    method = "slerp"
+                try:
+                    self._send_text(
+                        wire.encode_set_interp_method(path, method))
+                    self.log(f"set_interp_method({path!r}, {method!r})")
+                except Exception as e:
+                    self.log(f"set_interp_method send failed: {e}")
             return
 
         # 1. Pulse actions
@@ -2329,6 +2355,13 @@ class DemonExt:
             "prompt_b":     str(init_val("Initpromptb", "")),
             "lora_strengths": self._lora_strengths(),
             "fixture_name": str(init_val("Fixturename", "")),
+            # Playback-lead tuning (server-side decode buffer). Optional in
+            # the protocol ("omit to use server default") but the web client
+            # sends them from its config.json defaults, so we do too for
+            # parity. Sourced from the Init-page Lead* pars.
+            "lead_floor_s":   float(init_val("Leadfloor", 0.25)),
+            "lead_ceiling_s": float(init_val("Leadceiling", 1.35)),
+            "lead_release_tau_s": float(init_val("Leadreleasetau", 1.5)),
             # Capability gate — when True the server loads the fixture from
             # its own /fixtures cache and the client skips the audio frame
             # upload. The JS client capability-probes via /api/server-info
@@ -2473,6 +2506,11 @@ class DemonExt:
             self._failover_attempts = 0
             self._pending_audio = None
             self._pending_audio_samples = 0
+            # Re-push the per-path interpolation methods so the server
+            # matches the menus even after a (re)connect. Mirrors the web
+            # client's useInterpSync, which sends the full set on every
+            # transition into "ready".
+            self._push_interp_methods()
         elif kind == "lora_catalog":
             self._apply_lora_catalog(data.get("catalog") or [])
         elif kind == "params_update":
@@ -3166,6 +3204,26 @@ class DemonExt:
         self.log(
             f"seeded {seeded} continuous params into _dirty for first tick"
             f" (+{len(dedicated_sends)} dedicated)")
+
+    def _push_interp_methods(self) -> None:
+        """Send the current per-path interpolation method for all four
+        blend paths. Called on `ready` so the server matches the menus
+        even after a reconnect (mirrors demon-public-demo's useInterpSync
+        sendAll). No-op if not connected."""
+        if not self._connected:
+            return
+        for par_name, path in _INTERP_PAR_TO_PATH.items():
+            par = self._par_by_name(par_name)
+            if par is None:
+                continue
+            try:
+                method = str(par.eval())
+            except Exception:
+                method = "slerp"
+            try:
+                self._send_text(wire.encode_set_interp_method(path, method))
+            except Exception as e:
+                self.log(f"_push_interp_methods({path}) failed: {e}")
 
     # -------- TD plumbing ----------------------------------------------------
 

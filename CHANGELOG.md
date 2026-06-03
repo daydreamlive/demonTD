@@ -2,6 +2,66 @@
 
 All notable changes to demonTD. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.12] — 2026-06-03
+
+### Fix client-side disconnects: WS socket is now single-threaded
+
+Report: persistent disconnects with **no errors on the pod** — i.e. the
+client was tearing the connection down, not the server.
+
+Root cause: **concurrent read+write on the same `ssl.SSLSocket` from two
+threads.** Sends (`send_text`/`send_binary`, called from the main thread
+via the param stream / `OnParChange`) did `SSL_write` while the recv
+thread did `SSL_read` — with no lock between them (`_send_lock` only
+serialized send-vs-send). Python's `SSLSocket` is **not safe for
+simultaneous read+write**; OpenSSL's record layer corrupts, surfacing as
+`SSL: BAD_LENGTH` and an abrupt client-side close the pod never logs.
+v0.2.11's params-every-tick keepalive (~30–60 sends/s) made the collision
+window far more likely — which is why disconnects got *worse* after that.
+
+Fix — `ws_client.py` now touches the socket from **exactly one thread**:
+- `send_text`/`send_binary` only **enqueue** onto a bounded outbound
+  queue (any thread). The recv thread drains + sends it between recvs, so
+  `SSL_read` and `SSL_write` never overlap. Bounded queue drops oldest on
+  overflow (params are idempotent) so a stalled socket can't OOM/block.
+- `close()` no longer touches the socket either — it signals the recv
+  thread, which performs the actual `ws.close()` in its finally block.
+- **Removed the 25 s app-level WS ping** (it was another cross-thread
+  write). Keepalive is now purely the param stream, exactly like the
+  browser web client.
+- Rich close diagnostics: `closed (... ) — uptime=Xs sent=N recv=N
+  dropped=N since_last_recv=Xs queued=N`, so a "no pod error" disconnect
+  now says whether WE closed and how alive the link was.
+
+New `tests/test_ws_client.py` (6 tests) covers the enqueue/flush/overflow
+/failure logic. 78 tests pass total.
+
+BUILD_MARKER → v0.2.12-single-thread-ws-socket; UA → DaydreamDEMON-TD/0.2.12.
+
+### Verification
+- Hosted session stays connected; disconnects (if any) now print the
+  diagnostic line with `sent`/`recv`/`uptime` so the cause is unambiguous.
+- No more `SSL: BAD_LENGTH` floods.
+
+### Protocol parity with the latest backend (DEMON sync 1c07327)
+
+Closed the drift the checker surfaced against `origin/main` (it had been
+hidden by a stale local reference — fixed separately):
+
+- **3 new SessionConfig fields** — `lead_floor_s` (0.25), `lead_ceiling_s`
+  (1.35), `lead_release_tau_s` (1.5). Server-side decode-buffer lookahead
+  tuning (latency vs robustness to GPU contention). Exposed as Init-page
+  `Lead *` params and sent in the config at Connect, matching the web
+  client's defaults.
+- **`set_interp_method`** — per-path blend interpolation method
+  (slerp/linear) for prompt / timbre / structure / feedback. Four new
+  `Blend Interpolation` menus on the Prompt+LoRA page (default slerp =
+  server default); applied immediately on change and re-pushed on every
+  `ready`, mirroring the web client's `useInterpSync`.
+
+`scripts/check_protocol_drift.py` now reports **no drift** against
+`origin/main`. New `encode_set_interp_method` + test; 79 tests pass.
+
 ## [0.2.11] — 2026-06-02
 
 **The big one: sessions died right after `ready` with zero generation
