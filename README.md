@@ -30,9 +30,9 @@ the whole thing is scriptable from Python.
     then hit Connect.
 - Exposes ~70 parameters across 7 pages — every DEMON public param, plus
   session and operational controls.
-- Plays generated audio out of your Mac's default audio device via Python +
-  PortAudio (bundled). No need to wire an external `Audio Device Out CHOP` —
-  it just works.
+- Plays generated audio out of your system's default audio device (macOS and
+  Windows) via Python + PortAudio (bundled). No need to wire an external
+  `Audio Device Out CHOP` — it just works.
 - Exposes the live audio as a `Script CHOP` inside the COMP for visual
   reactivity — wire an `Analyze CHOP`, `Audio Spectrum CHOP`, peak detector,
   envelope follower, anything that consumes audio samples at frame rate.
@@ -51,10 +51,11 @@ the whole thing is scriptable from Python.
    fails to load with `ModuleNotFoundError: No module named 'websocket'`.
 2. Drag `demonTD.tox` (from the extracted folder) into any TouchDesigner
    project. A Base COMP named `demon` appears.
-3. **One-time TD setup:** Edit → Preferences → Audio → Audio Device → **None**.
-   This stops TouchDesigner from holding your Mac's audio device, which would
-   otherwise prevent our Python audio thread from opening it. (Details in the
-   [Audio output troubleshooting](#audio-output-troubleshooting) section.)
+3. No setup needed for audio — the operator plays through your system
+   default output via its own Python/PortAudio path ("Python Audio Out",
+   on by default). If you get **connected but hear nothing**, see
+   [Audio output troubleshooting](#audio-output-troubleshooting) — the
+   quick fix is usually to save and fully restart TouchDesigner.
 4. On the **Session** page, pick a mode:
    - **Hosted** (Daydream queue, no pod to manage — see
      [Quick start — Hosted mode](#quick-start--hosted-mode) below), OR
@@ -99,12 +100,15 @@ above, with a few Windows-specific notes:
    File In CHOP and let TD decode.
 
 4. **Audio output.** "Python Audio Out" plays through the vendored
-   `libportaudio64bit.dll` to your default Windows output device. There is
-   **no** "Preferences → Audio → Audio Device → None" step on Windows (that's
-   macOS-specific). If you hit a PortAudio open error, another app or an
-   Audio Device Out CHOP already owns the output device — close it, pick a
-   different output, or toggle **Python Audio Out** off and wire the COMP's
-   `out` → your own **Audio Device Out CHOP** so TD owns the device instead.
+   `libportaudio64bit.dll` to your default Windows output device. On Connect,
+   the textport prints which device it opened (`[speaker_out] output device:
+   ... hostApi='Windows WASAPI' ...`) — check it's the output you expect.
+   **Connected but no audio? Save and fully restart TouchDesigner first** —
+   the device selection can get into a bad state that a clean restart clears.
+   If it persists, set the right device as your Windows default output, close
+   other apps holding it, or toggle **Python Audio Out** off and wire the
+   COMP's `out` → your own **Audio Device Out CHOP**. See
+   [Audio output troubleshooting](#audio-output-troubleshooting).
 
 5. Everything else — Hosted/Direct mode, API key, prompts, LoRAs — is
    identical to macOS.
@@ -288,65 +292,63 @@ plays through speakers.
 
 ### Audio output troubleshooting
 
-If you see `[speaker_out] direct Pa_OpenDefaultStream@... failed: Internal
-PortAudio error (err=-9986) hostErr code=-10851 text='Audio Unit: Invalid
-Property Value'` in the textport on Connect, **TouchDesigner is holding
-your output device's Core Audio AudioUnit**, and our Python audio thread
-can't open it.
+**Connected but no audio?** The operator plays through your *system default
+output device* via its own Python/PortAudio path ("Python Audio Out", on by
+default). Silence is almost always one of: the wrong default output device
+got selected, or another app/op already owns the device.
 
-The fix is one click:
+On Connect, the textport prints exactly which device it opened — check it's
+the output you expect to hear:
 
-> **Edit → Preferences → Audio → Audio Device → None**
+```
+[speaker_out] output device: dev=3 name='Speakers (Realtek)' hostApi='Windows WASAPI' maxOut=2 defaultSampleRate=48000
+```
 
-Save Preferences. TD releases the device immediately; no restart needed.
-Re-pulse Connect and audio plays.
+**Fixes, in order:**
 
-#### Why this happens
+1. **Save, fully quit, and reopen TouchDesigner.** The output-device
+   selection can land in a bad state that a clean restart clears — this is
+   the first thing to try and resolves most "connected but silent" cases.
+2. **Make the device you want the system default**, then re-pulse Connect:
+   - **Windows:** Sound settings → set your output as the default device.
+   - **macOS:** System Settings → Sound → Output.
+3. **Free the device** if another app or an `Audio Device Out CHOP` in your
+   project already owns it (close the app / disable the CHOP).
+4. **Route through TD instead** — see the alternative below.
 
-TD has a global "Audio Device" preference. When it's set to anything
-other than `None`, TD opens that device's Core Audio output AudioUnit at
-startup — independent of whether you have any `Audio Device In/Out
-CHOPs` in your network. Once TD has the AudioUnit bound, Core Audio
-refuses to let a second client (our `SpeakerOut` via PortAudio) call
-`AudioUnitSetProperty(kAudioUnitProperty_StreamFormat)` on the same
-device. The result is `kAudioUnitErr_InvalidPropertyValue` (-10851)
-inside PortAudio, which surfaces as the "Internal PortAudio error" line.
+**Is it TD-side?** Run `python3 scripts/probe_portaudio.py` in a terminal —
+it makes the same PortAudio call without TouchDesigner. If the probe
+succeeds but demonTD is silent, something inside TD is interfering (restart,
+or use the route-through-TD option below).
 
-You can verify your bundled PortAudio + device are otherwise fine by
-running `python3 scripts/probe_portaudio.py` from a terminal — it makes
-the same call demonTD makes, without TouchDesigner in the picture. If
-the probe prints "OK", TD is the culprit.
+#### macOS: `-10851` / `kAudioUnitErr_InvalidPropertyValue`
 
-#### Alternative: keep TD's Audio Device set, bypass `Python Audio Out`
+If the textport shows `Internal PortAudio error (err=-9986) hostErr
+code=-10851`, Core Audio is refusing to let our PortAudio client open the
+device's AudioUnit because another client already holds it. A full TD
+restart usually clears it. If it persists, switch the system output to
+another device and back (System Settings → Sound → Output), then re-pulse
+Connect.
 
-If you need TD to own the device (because you have other audio ops in
-your project), leave the TD preference alone and route demonTD's audio
-through TD's chain instead:
+#### Alternative: route through TD instead of `Python Audio Out`
+
+If you'd rather have TD own the output device (e.g. you have other audio
+ops in your project), route demonTD's audio through TD's chain instead:
 
 1. Toggle the **Python Audio Out** par OFF on the Session page.
-2. Wire the COMP's `out_chop` output port to a TD-native
+2. Wire the COMP's `out` output port to a TD-native
    `Audio Device Out CHOP` placed outside the COMP.
 
 TD's audio chain has cook-rate quirks across COMP boundaries (documented
 in `src/audio.py`), but for a single output device with no upstream
 processing it generally works.
 
-#### Other rarer causes
+#### Filing a bug
 
-Two other things can make `Pa_OpenDefaultStream` fail with -10851, both
-much rarer than the TD-holds-the-device case above:
-
-1. **Default macOS output device is in a weird state.** Try System
-   Settings → Sound → Output → switch to MacBook Speakers (or any other
-   device), then back. Forces Core Audio to reconfigure.
-2. **Device hardware format mismatch.** Open Audio MIDI Setup (Spotlight),
-   select the device that's failing, set Format to
-   `Stereo 48000 Hz, 32-bit Float`, then re-pulse Connect.
-
-The textport log lines starting with `[speaker_out]` will show what
-PortAudio tried and the underlying Core Audio error code on each
-failure — that's enough to file a precise bug if none of the
-workarounds help.
+The textport lines starting with `[speaker_out]` show the opened device,
+every rate/buffer/format PortAudio tried, and the underlying error code on
+each failure — copy those (with the `output device:` line) into an issue if
+none of the fixes above help.
 
 ## Debug toggle
 

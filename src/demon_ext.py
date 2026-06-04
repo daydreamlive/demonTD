@@ -281,7 +281,7 @@ def eval_curve_linear(pts: list[tuple[float, float]], t: float) -> float:
 
 # Bump this on every meaningful change so the user can confirm at boot
 # which build is actually loaded. Visible on the "DemonExt initialized" line.
-BUILD_MARKER = "v0.2.12-ws-socket-and-protocol-parity"
+BUILD_MARKER = "v0.2.13-audio-device-diagnostics"
 
 # Hosted-mode pod failover cap. When a hosted WS opens but never reaches
 # `ready` (1011 keepalive / overloaded pod / etc.), we leave the dead
@@ -2668,12 +2668,10 @@ class DemonExt:
                         ok = self._speaker_out.start()
                         if not ok:
                             self._set_status(
-                                "Audio output failed. Set TD's Audio "
-                                "Device pref to None (Edit > Prefs > "
-                                "Audio) and re-pulse Connect, or toggle "
-                                "'Python Audio Out' off and wire your "
-                                "own Audio Device Out CHOP. Details in "
-                                "textport."
+                                "Audio output failed — try: save & fully "
+                                "restart TD; or toggle 'Python Audio Out' "
+                                "off and wire the COMP's out to your own "
+                                "Audio Device Out CHOP. Details in textport."
                             )
                 except Exception as e:
                     self.log(f"speaker_out start raised: {e}")

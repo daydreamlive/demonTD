@@ -2,6 +2,34 @@
 
 All notable changes to demonTD. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Audio: kill the fabricated "Preferences → Audio" fix; add device diagnostics
+
+A Windows tester hit **connected but no audio**, and our textport + Status
+field told them to *"Edit → Preferences → Audio → Audio Device → None"* — a
+**setting that does not exist** in TouchDesigner on any platform. Removed
+that fabricated instruction everywhere it appeared (the `[speaker_out]`
+failure message in `audio.py`, the Connect-failure Status line in
+`demon_ext.py`, and three spots in the README including the whole
+"global Audio Device preference" explanation, which was fiction).
+
+- **New diagnostic:** on every successful open, `speaker_out` now logs the
+  device it actually opened — `[speaker_out] output device: dev=N name=...
+  hostApi='Windows WASAPI' maxOut=2 defaultSampleRate=48000`. A "connected
+  but silent" session is almost always the wrong default device / host API
+  (esp. MME vs WASAPI on Windows); this makes it visible instead of a guess.
+- Failure/Status messaging now leads with the actual first fix (**save +
+  fully restart TD** — the device selection can land in a bad state a clean
+  restart clears), then accurate device-ownership guidance, cross-platform.
+- README "Audio output troubleshooting" rewritten around restart-first +
+  the new device log; macOS `-10851` kept as a platform-specific note.
+
+> Note: this does not yet change the device-*selection* logic (the likely
+> Windows root cause). It removes the misinformation and surfaces the data
+> needed to pin the real fix.
+
+
 ## [0.2.12] — 2026-06-03
 
 ### Fix client-side disconnects: WS socket is now single-threaded

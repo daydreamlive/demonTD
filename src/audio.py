@@ -607,6 +607,21 @@ class _PaHostErrorInfo(_ctypes.Structure):
     ]
 
 
+# Minimal mirror of PortAudio's PaHostApiInfo — enough to log which host
+# API backs the default output device (MME / DirectSound / WASAPI / WDM-KS
+# on Windows; Core Audio on macOS). On Windows the host-API + default-
+# device choice is the usual cause of a "connected but silent" session.
+class _PaHostApiInfo(_ctypes.Structure):
+    _fields_ = [
+        ("structVersion",       _ctypes.c_int),
+        ("type",                _ctypes.c_int),
+        ("name",                _ctypes.c_char_p),
+        ("deviceCount",         _ctypes.c_int),
+        ("defaultInputDevice",  _ctypes.c_int),
+        ("defaultOutputDevice", _ctypes.c_int),
+    ]
+
+
 # Mirror of PortAudio's PaStreamParameters. The "right" way to open a
 # stream — Pa_OpenDefaultStream is a wrapper around this that picks
 # a tight default latency. Some macOS devices reject the tight default
@@ -1102,9 +1117,10 @@ class SpeakerOut:
                             f"instead of {self._sample_rate} Hz. Audio will "
                             f"pitch by "
                             f"~{(chosen_rate / self._sample_rate - 1.0) * 100:+.2f}%. "
-                            f"Set your default output to "
-                            f"{int(self._sample_rate)} Hz in Audio MIDI "
-                            f"Setup to fix."
+                            f"Set your default output device to "
+                            f"{int(self._sample_rate)} Hz to fix "
+                            f"(macOS: Audio MIDI Setup; Windows: Sound "
+                            f"settings → device Properties → Advanced)."
                         )
                     if chosen_buf == _paFramesPerBufferUnspecified:
                         self._log(
@@ -1115,23 +1131,23 @@ class SpeakerOut:
 
         if err != 0:
             self._log(
-                "[speaker_out] no usable rate / buffer / format / open-mode "
-                "combination.\n"
-                "  >>> Most likely cause: TouchDesigner is holding the "
-                "output device's Core Audio AudioUnit. Fix: "
-                "Edit > Preferences > Audio > Audio Device > None (save; "
-                "no restart needed). Then re-pulse Connect.\n"
-                "  Confirm by running `python3 scripts/probe_portaudio.py` "
-                "from a terminal — if it succeeds outside TD, TD is the "
-                "culprit.\n"
-                "  Other workarounds:\n"
-                "    * Toggle 'Python Audio Out' OFF and wire `out_chop` "
-                "to your own Audio Device Out CHOP outside the COMP "
-                "(lets TD keep ownership of the device).\n"
-                "    * macOS System Settings > Sound > Output: switch to "
-                "a different device.\n"
-                "    * Audio MIDI Setup: set the device's Format to "
-                "'Stereo 48000 Hz, 32-bit Float'."
+                "[speaker_out] could not open the output device (no usable "
+                "rate / buffer / format / open-mode combination).\n"
+                f"  Default output device: {self._describe_default_output()}\n"
+                "  >>> First thing to try: SAVE, fully quit TouchDesigner, "
+                "and reopen. The output-device selection can get into a bad "
+                "state that a clean restart clears.\n"
+                "  If it still fails, another app or an Audio Device Out CHOP "
+                "in your project is holding the device:\n"
+                "    * Close other apps using the device, or switch your "
+                "system default output to another device, then re-pulse "
+                "Connect.\n"
+                "    * Or toggle 'Python Audio Out' OFF and wire the COMP's "
+                "`out` to your own Audio Device Out CHOP (lets TD own the "
+                "device instead of our Python/PortAudio path).\n"
+                "  To confirm it's TD-side, run "
+                "`python3 scripts/probe_portaudio.py` in a terminal — if that "
+                "succeeds outside TD, something inside TD owns the device."
             )
             return False
 
@@ -1162,7 +1178,46 @@ class SpeakerOut:
             f"format={fmt_label} "
             f"frames_per_buffer={buf_label} (latency {latency_label})"
         )
+        # Log WHICH device PortAudio actually opened. A "connected but no
+        # audio" session is almost always the wrong default output device
+        # / host API (esp. on Windows: MME vs WASAPI) — this makes it
+        # visible instead of a guessing game. Done only AFTER a successful
+        # open+start so the (macOS-sensitive) device probe can't poison the
+        # AudioUnit before the stream exists.
+        self._log(
+            f"[speaker_out] output device: {self._describe_default_output()}")
         return True
+
+    def _describe_default_output(self) -> str:
+        """Best-effort one-line description of the default output device
+        (index, name, host API, channels, sample rate). Purely diagnostic;
+        returns a '?' string on any failure and never raises."""
+        lib = SpeakerOut._lib
+        if lib is None:
+            return "?"
+        try:
+            dev = int(lib.Pa_GetDefaultOutputDevice())
+            if dev < 0:
+                return f"none (Pa_GetDefaultOutputDevice={dev})"
+            info_ptr = lib.Pa_GetDeviceInfo(dev)
+            if not info_ptr:
+                return f"dev={dev} (no device info)"
+            info = info_ptr.contents
+            name = (info.name or b"?").decode(errors="replace")
+            host = "?"
+            try:
+                hptr = lib.Pa_GetHostApiInfo(int(info.hostApi))
+                if hptr:
+                    h = _ctypes.cast(
+                        hptr, _ctypes.POINTER(_PaHostApiInfo)).contents
+                    host = (h.name or b"?").decode(errors="replace")
+            except Exception:
+                pass
+            return (f"dev={dev} name={name!r} hostApi={host!r} "
+                    f"maxOut={int(info.maxOutputChannels)} "
+                    f"defaultSampleRate={float(info.defaultSampleRate):g}")
+        except Exception as e:
+            return f"? (probe failed: {type(e).__name__}: {e})"
 
     def stop(self) -> None:
         lib = SpeakerOut._lib
