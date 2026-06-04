@@ -94,6 +94,23 @@ SESSION_PARAMS: list[Param] = [
                "rate across a Base COMP boundary. Toggle off if you want "
                "to route the audio only via the COMP's out_chop port to "
                "your own external Audio Device Out CHOP."),
+    # Output device picker. Defaults to "system default", which is whatever
+    # device PortAudio (and TD) was already using — the cause of the
+    # "connected but no audio" reports when that default isn't the device
+    # the user is actually listening on. Pulse "Refresh Audio Devices" to
+    # populate the menu, pick a device, and (re-)Connect to apply.
+    Param("Audiodevice", None, "Session", "Menu", "session", default="-1",
+          order=56, label="Audio Output Device",
+          menu_names=("-1",), menu_labels=("Default (system)",),
+          help="Which output device 'Python Audio Out' plays through. "
+               "'Default (system)' uses the OS default. Pulse Refresh Audio "
+               "Devices to list devices; changing this while connected "
+               "restarts playback on the new device."),
+    Param("Refreshaudiodevices", None, "Session", "Pulse", "session",
+          order=57, label="Refresh Audio Devices",
+          help="Enumerate the system's audio output devices and populate "
+               "the Audio Output Device menu. Run this if your device isn't "
+               "listed or you just plugged one in."),
     # ---------- Hosted mode (v0.2+) ----------
     # Mode toggles between Direct (a pod URL the user supplies) and
     # Hosted (the Daydream queue at music.daydream.live). Connect()

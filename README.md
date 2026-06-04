@@ -100,14 +100,13 @@ above, with a few Windows-specific notes:
    File In CHOP and let TD decode.
 
 4. **Audio output.** "Python Audio Out" plays through the vendored
-   `libportaudio64bit.dll` to your default Windows output device. On Connect,
-   the textport prints which device it opened (`[speaker_out] output device:
-   ... hostApi='Windows WASAPI' ...`) — check it's the output you expect.
-   **Connected but no audio? Save and fully restart TouchDesigner first** —
-   the device selection can get into a bad state that a clean restart clears.
-   If it persists, set the right device as your Windows default output, close
-   other apps holding it, or toggle **Python Audio Out** off and wire the
-   COMP's `out` → your own **Audio Device Out CHOP**. See
+   `libportaudio64bit.dll`. By default it uses your system default output;
+   on Connect the textport prints which device it opened (`[speaker_out]
+   output device: ... hostApi='Windows WASAPI' ...`). **Connected but no
+   audio?** Pulse **Refresh Audio Devices** on the Session page and pick your
+   output from the **Audio Output Device** menu (switches live). If a device
+   won't open, save + fully restart TD, or toggle **Python Audio Out** off and
+   wire the COMP's `out` → your own **Audio Device Out CHOP**. See
    [Audio output troubleshooting](#audio-output-troubleshooting).
 
 5. Everything else — Hosted/Direct mode, API key, prompts, LoRAs — is
@@ -306,15 +305,18 @@ the output you expect to hear:
 
 **Fixes, in order:**
 
-1. **Save, fully quit, and reopen TouchDesigner.** The output-device
-   selection can land in a bad state that a clean restart clears — this is
-   the first thing to try and resolves most "connected but silent" cases.
-2. **Make the device you want the system default**, then re-pulse Connect:
-   - **Windows:** Sound settings → set your output as the default device.
-   - **macOS:** System Settings → Sound → Output.
-3. **Free the device** if another app or an `Audio Device Out CHOP` in your
+1. **Pick the device explicitly.** On the Session page, pulse **Refresh Audio
+   Devices**, then choose your output from the **Audio Output Device** menu.
+   Changing it while connected switches playback live; otherwise it applies on
+   the next Connect. This is the direct fix when the wrong default device was
+   selected.
+2. **Save, fully quit, and reopen TouchDesigner.** The device selection can
+   land in a bad state that a clean restart clears.
+3. **Or make the device you want the system default**, then re-pulse Connect
+   (Windows: Sound settings; macOS: System Settings → Sound → Output).
+4. **Free the device** if another app or an `Audio Device Out CHOP` in your
    project already owns it (close the app / disable the CHOP).
-4. **Route through TD instead** — see the alternative below.
+5. **Route through TD instead** — see the alternative below.
 
 **Is it TD-side?** Run `python3 scripts/probe_portaudio.py` in a terminal —
 it makes the same PortAudio call without TouchDesigner. If the probe

@@ -2,9 +2,31 @@
 
 All notable changes to demonTD. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.2.13] — 2026-06-04
 
-### Audio: kill the fabricated "Preferences → Audio" fix; add device diagnostics
+### Audio output device picker (fixes "connected but no audio")
+
+Reports on **both macOS and Windows** of a session connecting but playing no
+sound. Cause: the operator always opened the **system default** output device
+(`Pa_OpenDefaultStream`) — whatever device PortAudio/TD happened to be on —
+with no way to choose another. When that default wasn't the device the user
+was listening on, silence.
+
+- **New `Audio Output Device` menu** on the Session page + a **Refresh Audio
+  Devices** pulse. Refresh enumerates output-capable PortAudio devices (name
+  + host API: Core Audio / MME / WASAPI / …); pick one and Connect.
+- **Live switching:** changing the menu while connected restarts the Python
+  audio stream on the new device immediately (no reconnect).
+- `SpeakerOut` opens an explicitly-chosen device via `PaStreamParameters`
+  (reusing the proven rate/buffer/format fallback matrix), skipping the
+  default-device fast path. `-1` = system default (unchanged behavior).
+- Enumeration brackets a balanced `Pa_Initialize`/`Pa_Terminate` so it leaves
+  PortAudio's refcount untouched — avoids the macOS eager-probe poisoning
+  that motivated the lazy-probe design.
+- New `list_output_devices()` + pure `format_output_device_menu()` (unit
+  tested); 81 tests pass.
+
+### Audio: removed the fabricated "Preferences → Audio" fix; device diagnostics
 
 A Windows tester hit **connected but no audio**, and our textport + Status
 field told them to *"Edit → Preferences → Audio → Audio Device → None"* — a

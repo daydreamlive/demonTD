@@ -281,7 +281,7 @@ def eval_curve_linear(pts: list[tuple[float, float]], t: float) -> float:
 
 # Bump this on every meaningful change so the user can confirm at boot
 # which build is actually loaded. Visible on the "DemonExt initialized" line.
-BUILD_MARKER = "v0.2.13-audio-device-diagnostics"
+BUILD_MARKER = "v0.2.13-audio-device-picker"
 
 # Hosted-mode pod failover cap. When a hosted WS opens but never reaches
 # `ready` (1011 keepalive / overloaded pod / etc.), we leave the dead
@@ -1260,6 +1260,14 @@ class DemonExt:
                 self._apply_mode_visibility(par.eval())
             except Exception as e:
                 self.log(f"OnParChange(Mode) visibility update failed: {e}")
+            return
+
+        # Audio output device picker. Apply live: if we're connected and
+        # playing through Python Audio Out, restart the speaker stream on
+        # the newly-selected device so the switch is immediate; otherwise it
+        # just takes effect on the next Connect.
+        if name == "Audiodevice":
+            self._apply_audio_device_selection(restart_if_live=True)
             return
 
         # Per-path blend interpolation method — discrete set_interp_method
@@ -2665,6 +2673,8 @@ class DemonExt:
                 # and doesn't fix the audio problem.
                 try:
                     if bool(self._read_par("Speakerout", True)):
+                        # Honor the user's output-device pick before opening.
+                        self._apply_audio_device_selection()
                         ok = self._speaker_out.start()
                         if not ok:
                             self._set_status(
@@ -2891,6 +2901,79 @@ class DemonExt:
 
     # -------- Pulse handlers -------------------------------------------------
 
+    def _selected_audio_device_index(self) -> int:
+        """Parse the Audiodevice menu value to an int device index.
+        -1 (or any blank / unparseable value) = system default."""
+        try:
+            return int(str(self._read_par("Audiodevice", "-1")))
+        except Exception:
+            return -1
+
+    def _apply_audio_device_selection(self, restart_if_live: bool = False
+                                      ) -> None:
+        """Push the Audiodevice selection to SpeakerOut. When
+        restart_if_live and we're connected + playing through Python Audio
+        Out, restart the stream so the change applies immediately."""
+        so = getattr(self, "_speaker_out", None)
+        if so is None:
+            return
+        idx = self._selected_audio_device_index()
+        try:
+            so.set_device_index(idx)
+        except Exception as e:
+            self.log(f"set audio device failed: {e}")
+            return
+        if not restart_if_live:
+            return
+        if self._connected and bool(self._read_par("Speakerout", True)):
+            try:
+                so.stop()
+                ok = so.start()
+                self.log(f"audio device → index={idx}: "
+                         f"{'restarted' if ok else 'restart FAILED'}")
+                if not ok:
+                    self._set_status(
+                        "Audio device switch failed — see textport. Try "
+                        "another device or Refresh Audio Devices.")
+            except Exception as e:
+                self.log(f"audio device live-switch raised: {e}")
+
+    def _refresh_audio_devices(self) -> None:
+        """Enumerate output devices and repopulate the Audiodevice menu,
+        preserving the current selection if it still exists. Bound to the
+        Refresh Audio Devices pulse."""
+        par = self._par_by_name("Audiodevice")
+        if par is None:
+            self.log("Refresh Audio Devices: Audiodevice par not found")
+            return
+        dylib = getattr(self._speaker_out, "_dylib_path", None)
+        try:
+            devices = audio_mod.SpeakerOut.list_output_devices(
+                dylib_path=dylib, log=self.log)
+        except Exception as e:
+            self.log(f"Refresh Audio Devices failed: {e}")
+            return
+        names, labels = audio_mod.format_output_device_menu(devices)
+        try:
+            prev = str(par.eval())
+        except Exception:
+            prev = audio_mod.DEFAULT_DEVICE_TOKEN
+        try:
+            par.menuNames = names
+            par.menuLabels = labels
+            par.val = prev if prev in names else audio_mod.DEFAULT_DEVICE_TOKEN
+        except Exception as e:
+            self.log(f"Refresh Audio Devices: menu update failed: {e}")
+            return
+        summary = ", ".join(
+            f"[{d['index']}] {d['name']} ({d['host_api']})"
+            + ("*" if d.get("is_default") else "")
+            for d in devices) or "(none found)"
+        self.log(f"Audio output devices ({len(devices)}): {summary}")
+        self._set_status(
+            f"Found {len(devices)} audio output device(s) — pick one, then "
+            f"Connect (switches live if already playing).")
+
     def _handle_pulse(self, name: str) -> None:
         dispatch = {
             "Connect": lambda: self.Connect(),
@@ -2911,6 +2994,7 @@ class DemonExt:
             "Setstructuresource": lambda: self.SetStructureSource(),
             "Clearstructuresource": lambda: self.ClearStructureSource(),
             "Setstructurefixture": lambda: self.SetStructureFixture(),
+            "Refreshaudiodevices": lambda: self._refresh_audio_devices(),
         }
         fn = dispatch.get(name)
         if fn:

@@ -637,6 +637,30 @@ class _PaStreamParameters(_ctypes.Structure):
     ]
 
 
+# Sentinel menu value for "use the system default output device".
+DEFAULT_DEVICE_TOKEN = "-1"
+
+
+def format_output_device_menu(
+        devices: list[dict]) -> tuple[list[str], list[str]]:
+    """Build (menu_names, menu_labels) for the Audio Output Device menu
+    from SpeakerOut.list_output_devices() output.
+
+    `menu_names` are the *values* read back via par.eval() — device indices
+    as strings, with "-1" first for the system default. `menu_labels` are the
+    human-readable display strings. Pure function — unit-tested, no PortAudio.
+    """
+    names: list[str] = [DEFAULT_DEVICE_TOKEN]
+    labels: list[str] = ["Default (system)"]
+    for d in devices:
+        names.append(str(int(d["index"])))
+        label = f"{d.get('name', '?')} — {d.get('host_api', '?')}"
+        if d.get("is_default"):
+            label += " [system default]"
+        labels.append(label)
+    return names, labels
+
+
 class SpeakerOut:
     """Plays a LoopBuffer to the system default audio device at audio rate.
 
@@ -781,10 +805,16 @@ class SpeakerOut:
                  channels: int = 2,
                  log=print,
                  dylib_path: str | None = None,
-                 frames_per_buffer: int = 4096):
+                 frames_per_buffer: int = 4096,
+                 device_index: int = -1):
         self._loop = loop
         self._sample_rate = float(sample_rate)
         self._channels = int(channels)
+        # PortAudio output device index to open. -1 = system default
+        # (Pa_OpenDefaultStream fast path). >= 0 = a specific device the
+        # user picked (see list_output_devices); opened explicitly via
+        # PaStreamParameters. Set by set_device_index() before start().
+        self._device_index = int(device_index)
         # Larger blocks = fewer Python callbacks per second = less GIL
         # contention with TD's main thread. 4096 frames @ 48 kHz = ~85 ms.
         # That's our audio latency floor; acceptable for a generative
@@ -931,25 +961,38 @@ class SpeakerOut:
         chosen_rate = self._sample_rate
         chosen_buf = self._frames_per_buffer
         chosen_format = _paFloat32
-        err = lib.Pa_OpenDefaultStream(
-            _ctypes.byref(stream_ptr),
-            0,                              # no input
-            self._channels,
-            _paFloat32,
-            self._sample_rate,
-            self._frames_per_buffer,
-            _ctypes.cast(self._c_callback, _ctypes.c_void_p),
-            None,
-        )
-        if err != 0:
-            msg = (lib.Pa_GetErrorText(err) or b"unknown").decode(
-                errors="replace")
+        # When the user picked a specific output device, skip the
+        # default-device fast path entirely (it opens the *default* device,
+        # not the chosen one) and go straight to opening that device via
+        # PaStreamParameters in the matrix below. err=-1 forces it.
+        explicit = self._device_index >= 0
+        if explicit:
+            err = -1
             self._log(
-                f"[speaker_out] direct Pa_OpenDefaultStream@"
-                f"{self._sample_rate}Hz buf={self._frames_per_buffer} "
-                f"failed: {msg} (err={err}){_host_error_detail()} "
-                f"— running fallback matrix"
+                f"[speaker_out] opening user-selected output device "
+                f"index={self._device_index} "
+                f"(skipping default-device fast path)"
             )
+        else:
+            err = lib.Pa_OpenDefaultStream(
+                _ctypes.byref(stream_ptr),
+                0,                              # no input
+                self._channels,
+                _paFloat32,
+                self._sample_rate,
+                self._frames_per_buffer,
+                _ctypes.cast(self._c_callback, _ctypes.c_void_p),
+                None,
+            )
+            if err != 0:
+                msg = (lib.Pa_GetErrorText(err) or b"unknown").decode(
+                    errors="replace")
+                self._log(
+                    f"[speaker_out] direct Pa_OpenDefaultStream@"
+                    f"{self._sample_rate}Hz buf={self._frames_per_buffer} "
+                    f"failed: {msg} (err={err}){_host_error_detail()} "
+                    f"— running fallback matrix"
+                )
 
         # --- Step 2: only on failure, probe + run fallback matrix --------------
         device_rate: float | None = None
@@ -958,7 +1001,8 @@ class SpeakerOut:
         device_max_out: int = self._channels
         if err != 0:
             try:
-                dev = int(lib.Pa_GetDefaultOutputDevice())
+                dev = (self._device_index if explicit
+                       else int(lib.Pa_GetDefaultOutputDevice()))
                 if dev >= 0:
                     device_index = dev
                     info_ptr = lib.Pa_GetDeviceInfo(dev)
@@ -1006,8 +1050,11 @@ class SpeakerOut:
             local_rate = self._sample_rate
             local_buf = self._frames_per_buffer
 
-            # Layer 1: Pa_OpenDefaultStream matrix.
-            for rate in rates:
+            # Layer 1: Pa_OpenDefaultStream matrix. Skipped when the user
+            # picked an explicit device — Pa_OpenDefaultStream always opens
+            # the *default* device, so we jump straight to Layer 2 (explicit
+            # PaStreamParameters on the chosen device index).
+            for rate in ([] if explicit else rates):
                 for bufsz in bufsizes:
                     local_stream = _ctypes.c_void_p()
                     local_err = lib.Pa_OpenDefaultStream(
@@ -1185,18 +1232,93 @@ class SpeakerOut:
         # open+start so the (macOS-sensitive) device probe can't poison the
         # AudioUnit before the stream exists.
         self._log(
-            f"[speaker_out] output device: {self._describe_default_output()}")
+            f"[speaker_out] output device: "
+            f"{self._describe_default_output(self._device_index if self._device_index >= 0 else None)}")
         return True
 
-    def _describe_default_output(self) -> str:
-        """Best-effort one-line description of the default output device
-        (index, name, host API, channels, sample rate). Purely diagnostic;
-        returns a '?' string on any failure and never raises."""
+    def set_device_index(self, index: int) -> None:
+        """Choose which output device start() opens. -1 = system default.
+        Takes effect on the next start() (the caller restarts the stream to
+        switch live). No PortAudio calls here — safe from the main thread."""
+        self._device_index = int(index)
+
+    @classmethod
+    def list_output_devices(cls, dylib_path: str | None = None,
+                            log=print) -> list[dict]:
+        """Enumerate output-capable PortAudio devices for the device picker.
+
+        Returns a list of dicts:
+          {index, name, host_api, max_out, default_sr, is_default}
+
+        Brackets the probe with a balanced Pa_Initialize/Pa_Terminate so it
+        leaves PortAudio's refcount exactly as it found it — important on
+        macOS, where eager Pa_GetDeviceInfo calls can otherwise poison a
+        later default-stream open. Never raises; returns [] on any failure.
+        """
+        lib = cls._load_lib(dylib_path, log=log)
+        if lib is None:
+            return []
+        devices: list[dict] = []
+        initialized = False
+        try:
+            if lib.Pa_Initialize() != 0:
+                return []
+            initialized = True
+            count = int(lib.Pa_GetDeviceCount())
+            try:
+                default = int(lib.Pa_GetDefaultOutputDevice())
+            except Exception:
+                default = -1
+            for i in range(max(0, count)):
+                info_ptr = lib.Pa_GetDeviceInfo(i)
+                if not info_ptr:
+                    continue
+                info = info_ptr.contents
+                if int(info.maxOutputChannels) <= 0:
+                    continue
+                name = (info.name or b"?").decode(errors="replace")
+                host = "?"
+                try:
+                    hptr = lib.Pa_GetHostApiInfo(int(info.hostApi))
+                    if hptr:
+                        h = _ctypes.cast(
+                            hptr, _ctypes.POINTER(_PaHostApiInfo)).contents
+                        host = (h.name or b"?").decode(errors="replace")
+                except Exception:
+                    pass
+                devices.append({
+                    "index": i,
+                    "name": name,
+                    "host_api": host,
+                    "max_out": int(info.maxOutputChannels),
+                    "default_sr": float(info.defaultSampleRate),
+                    "is_default": (i == default),
+                })
+        except Exception as e:
+            log(f"[speaker_out] list_output_devices failed: "
+                f"{type(e).__name__}: {e}")
+        finally:
+            # Balance our Pa_Initialize. PortAudio refcounts, so this only
+            # actually terminates if nothing else holds it — it never tears
+            # down a live stream (start() holds its own init).
+            if initialized:
+                try:
+                    lib.Pa_Terminate()
+                except Exception:
+                    pass
+        return devices
+
+    def _describe_default_output(self, index: int | None = None) -> str:
+        """Best-effort one-line description of an output device (index,
+        name, host API, channels, sample rate). `index=None` means the
+        system default. Purely diagnostic; returns a '?' string on any
+        failure and never raises."""
         lib = SpeakerOut._lib
         if lib is None:
             return "?"
         try:
-            dev = int(lib.Pa_GetDefaultOutputDevice())
+            dev = int(lib.Pa_GetDefaultOutputDevice()) if index is None \
+                else int(index)
             if dev < 0:
                 return f"none (Pa_GetDefaultOutputDevice={dev})"
             info_ptr = lib.Pa_GetDeviceInfo(dev)

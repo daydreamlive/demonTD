@@ -330,3 +330,33 @@ def test_to_stereo_quad_to_stereo():
     out = audio_mod.to_stereo(q)
     assert out.shape == (2, 5)
     np.testing.assert_array_equal(out, q[:2])
+
+
+# ---- output-device picker menu formatting ----------------------------------
+
+def test_format_output_device_menu_empty():
+    names, labels = audio_mod.format_output_device_menu([])
+    # Always offers the system-default option first.
+    assert names == [audio_mod.DEFAULT_DEVICE_TOKEN]
+    assert names[0] == "-1"
+    assert labels == ["Default (system)"]
+
+
+def test_format_output_device_menu_devices():
+    devices = [
+        {"index": 0, "name": "Built-in Output", "host_api": "Core Audio",
+         "max_out": 2, "default_sr": 48000.0, "is_default": True},
+        {"index": 3, "name": "Speakers (Realtek)",
+         "host_api": "Windows WASAPI", "max_out": 2, "default_sr": 48000.0,
+         "is_default": False},
+    ]
+    names, labels = audio_mod.format_output_device_menu(devices)
+    # Default sentinel first, then device indices as strings (these are the
+    # values par.eval() returns and must round-trip back to the index).
+    assert names == ["-1", "0", "3"]
+    assert int(names[2]) == 3
+    assert labels[0] == "Default (system)"
+    assert "Built-in Output" in labels[1] and "Core Audio" in labels[1]
+    assert "[system default]" in labels[1]
+    assert "Windows WASAPI" in labels[2]
+    assert "[system default]" not in labels[2]
