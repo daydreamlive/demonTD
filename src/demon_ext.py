@@ -281,7 +281,7 @@ def eval_curve_linear(pts: list[tuple[float, float]], t: float) -> float:
 
 # Bump this on every meaningful change so the user can confirm at boot
 # which build is actually loaded. Visible on the "DemonExt initialized" line.
-BUILD_MARKER = "v0.2.13-audio-device-picker"
+BUILD_MARKER = "v0.2.14-seed-int"
 
 # Hosted-mode pod failover cap. When a hosted WS opens but never reaches
 # `ready` (1011 keepalive / overloaded pod / etc.), we leave the dead
@@ -2974,6 +2974,22 @@ class DemonExt:
             f"Found {len(devices)} audio output device(s) — pick one, then "
             f"Connect (switches live if already playing).")
 
+    def _randomize_seed(self) -> None:
+        """Set the Seed par to a random integer (the web client's dice
+        button). Setting par.val fires OnParChange("Seed"), which routes it
+        into the continuous params stream like any manual edit."""
+        import random
+        par = self._par_by_name("Seed")
+        if par is None:
+            self.log("Randomize Seed: Seed par not found")
+            return
+        val = random.randint(0, 2147483647)
+        try:
+            par.val = val
+            self.log(f"seed → {val}")
+        except Exception as e:
+            self.log(f"randomize seed failed: {e}")
+
     def _handle_pulse(self, name: str) -> None:
         dispatch = {
             "Connect": lambda: self.Connect(),
@@ -2995,6 +3011,7 @@ class DemonExt:
             "Clearstructuresource": lambda: self.ClearStructureSource(),
             "Setstructurefixture": lambda: self.SetStructureFixture(),
             "Refreshaudiodevices": lambda: self._refresh_audio_devices(),
+            "Randomizeseed": lambda: self._randomize_seed(),
         }
         fn = dispatch.get(name)
         if fn:

@@ -327,9 +327,19 @@ SYNTHESIS_PARAMS: list[Param] = [
     Param("Denoise", "denoise", "Synthesis", "Float", "continuous", default=0.85,
           min=0.0, max=1.0, clamp_min=True, clamp_max=True, order=10,
           help="Denoising strength."),
-    Param("Seed", "seed", "Synthesis", "Float", "continuous", default=0.0,
-          min=0.0, max=1.0, clamp_min=True, clamp_max=True, order=20,
-          help="Random seed (normalized 0..1)."),
+    # Generation seed. The reference web client uses an arbitrary uint32
+    # (config.json default 42, with a "dice" button to randomize) — NOT a
+    # normalized 0..1 value, which is what this used to (wrongly) be. We
+    # cap at int32 max to stay safely inside TD's numeric-par range; that's
+    # still ~2.1 billion seeds. Streamed continuously like the web client.
+    Param("Seed", "seed", "Synthesis", "Int", "continuous", default=42,
+          min=0, max=2147483647, clamp_min=True, clamp_max=True, order=20,
+          label="Seed",
+          help="Generation seed — an arbitrary integer. Pulse Randomize "
+               "Seed for a fresh random value (like the web client's dice)."),
+    Param("Randomizeseed", None, "Synthesis", "Pulse", "session", order=25,
+          label="Randomize Seed",
+          help="Set Seed to a random integer."),
     Param("Feedback", "feedback", "Synthesis", "Float", "continuous", default=0.0,
           min=0.0, max=1.0, clamp_min=True, clamp_max=True, order=30,
           help="Feedback loop (pro). Use with caution."),

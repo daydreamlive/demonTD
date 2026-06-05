@@ -2,6 +2,25 @@
 
 All notable changes to demonTD. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.14] — 2026-06-05
+
+### Fix: Seed is an integer, not a 0–1 slider
+
+The `Seed` param was a `Float` clamped to `0.0–1.0` — which can't express a
+real generation seed (every value rounded to ~the same seed server-side).
+The reference web client uses an **arbitrary uint32** (`config.json`
+default 42) with a dice button to randomize.
+
+- `Seed` is now an **Int** (default 42, range `0 … 2147483647` — capped at
+  int32 max to stay safely inside TD's numeric-par range; ~2.1 billion
+  seeds). Still streamed continuously in the params message, now as an
+  integer.
+- New **Randomize Seed** pulse on the Synthesis page sets Seed to a random
+  integer (the web client's dice), since typing a 10-digit seed by hand is
+  no fun.
+
+BUILD_MARKER → v0.2.14-seed-int. 81 tests pass.
+
 ## [0.2.13] — 2026-06-04
 
 ### Audio output device picker (fixes "connected but no audio")
