@@ -2,6 +2,124 @@
 
 All notable changes to demonTD. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.15] — 2026-06-09
+
+### Big one: LoRA trigger word prepend (fixes "LoRAs feel weaker in TD")
+
+Every LoRA carries a `metadata.primary_trigger_word` — the activation
+token it was trained against. For the LoRA's style to actually fire,
+that word has to reach the model's text encoder. TD was passing the
+user's prompt through verbatim — enabling a LoRA loaded it server-side
+but the encoder never saw the activation token, so the LoRA's style
+barely affected output. The canonical web client injects the trigger
+prefix at WS send time; TD now does the same.
+
+- **New `src/lora_triggers.py`** — pure-Python port of
+  `demon-public-demo/vendor/demon-ui/lib/loraTriggers.ts`
+  (`build_trigger_prefix` + `strip_leading_triggers` + `inject`).
+  Idempotent, dedupes case-insensitively, strips stale prefixes from
+  upstream drift.
+- `_apply_lora_catalog` captures `metadata.primary_trigger_word` into
+  a new `trigger_word` column on the `lora_catalog` Table DAT and an
+  in-memory dict.
+- `SendPrompt` prepends the prefix to both `tags` AND `tags_b`,
+  stripping any stale leading triggers first.
+- **New `Auto-Prepend LoRA Triggers` toggle** on the Prompt+LoRA page
+  (default On). Off = manual workflow where you include trigger words
+  in the prompt yourself.
+- **`enable_lora` / `disable_lora` now also re-push the prompt** so the
+  encoder picks up the new trigger prefix immediately — without this,
+  toggling a LoRA loaded it server-side but the encoder kept running
+  the stale prompt and the user had to touch a strength slider or
+  pulse Sendprompt to make the LoRA audibly fire.
+
+### Tags B / Prompt blending now actually blends
+
+`Promptblend` was streaming a value to the server but blending nothing
+because the second prompt was empty mid-session. `encode_prompt`
+accepted `tags_b` but `SendPrompt` never passed it, and there was no
+runtime `Promptb` param — only the hidden Init-page `Initpromptb`,
+sent once in SessionConfig and never editable while connected.
+
+- **New `Promptb` Str param** on the Prompt+LoRA page next to `Prompt`.
+  Edits are picked up on the next Send Prompt.
+- `SendPrompt` reads `Promptb` and passes as `tags_b` to
+  `encode_prompt`. LoRA prefix above injects into both.
+- `_build_session_config` now sources `prompt_b` from the live
+  `Promptb` — one source of truth, editable any time. Deleted
+  `Initpromptb`.
+
+### Synthesis page: "Structure" (the canonical's label)
+
+`hint_strength` is the model's structure control — it governs how
+closely the model follows the source's section / rhythm / dynamics.
+The canonical web client labels it **"Structure"**; TD was labeling
+it "Hint Strength" with the help text "Reference latent hint
+strength." A user looking for a Structure knob next to Timbre Strength
+couldn't find one. Wire key unchanged; only the user-facing label and
+tooltip updated to match the canonical's `DISPLAY_NAMES` table.
+
+Also caught + corrected by the new drift checker's label-parity check:
+- `Denoise` → **"Strength"** (canonical: users perceive this knob as
+  "how strong is the remix", not as a diffusion-process internal).
+- `DCW Scaler` → **"DCW low"** (band-pair naming).
+- `DCW High Scaler` → **"DCW high"**.
+
+### Drift checker hardening — would have caught all of the above
+
+The original drift checker only inspected protocol message types,
+SessionConfig field names, and SLICE constants. Four new checks:
+
+- **`ui_coverage`** — every `DISCRETE_PULSE_TO_KIND` pulse must have a
+  non-hidden Param in `params.py`. Catches "protocol exists but the UI
+  can't fire it."
+- **`label_parity`** — TD `Param` labels must contain the canonical's
+  `DISPLAY_NAMES` word for shared wire keys. Catches Hint-Strength-vs-
+  Structure and similar.
+- **`lora_trigger_injection`** — verifies the three integration points
+  (module exists, `_apply_lora_catalog` captures `primary_trigger_word`,
+  `SendPrompt` calls `inject`).
+- **`tags_b_plumbing`** — if SessionConfig sends `prompt_b`, an
+  `encode_prompt(...)` call site must pass `tags_b=`.
+
+Each verified by regression-testing (temporarily break → check fires).
+
+### Fix: UI lag from `_apply_lora_catalog` thrashing
+
+First cut of the LoRA trigger work folded `trigger_word` into the
+catalog signature used to skip redundant Table DAT + dynamic-par
+rebuilds. The server echoes the catalog with metadata on some events
+and without it on others; sig flipped every echo, forcing a full UI
+redraw on every `enable_lora`. Manifested as major per-parameter UI
+lag. Sig is now id-only (matches original behavior); trigger dict
+updates idempotently outside the sig check.
+
+### Fix: "DAT did not load from … overwrite anyway?" dialog on import
+
+Earlier builds set `dat.par.file = abs_path` on every code DAT in the
+exported .tox. When users imported the .tox into a fresh project, TD
+evaluated each absolute developer path on first instantiation and
+prompted on every miss. Now `par.file = ""` — the embedded `dat.text`
+is the only source; nothing for TD to fail loading on.
+
+Dev hot-reload workflow (per session, no longer baked in): in TD,
+re-point the DAT's file picker at your local `src/<file>.py` and flip
+`loadonstart` to True on that instance. Don't commit.
+
+### Known cosmetic mismatch
+
+The shipped .tox carries `BUILD_MARKER = v0.2.15-...-lora-resend` (the
+boot textport string) but `DEMON_TD_VERSION = 0.2.14` (the User-Agent
+sent on cloud REST calls). TD's bidirectional DAT sync wrote the old
+`version.py` back to disk between the version bump and the rebuild —
+the underlying root cause (`syncfile=True` baked into the previous
+build's DATs) is fixed in this release for everyone running v0.2.16+,
+but this specific .tox is mid-upgrade. Functionally identical to
+v0.2.15 in every other respect.
+
+### Stats
+105 unit tests pass (24 new). Drift checker clean against `origin/main`.
+
 ## [0.2.14] — 2026-06-05
 
 ### Fix: Seed is an integer, not a 0–1 slider
