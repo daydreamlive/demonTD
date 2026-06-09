@@ -198,6 +198,7 @@ try:
     ws_client_mod = _mod('ws_client')
     lora_triggers = _mod('lora_triggers')
     telemetry_mod = _mod('telemetry')
+    queue_worker_mod = _mod('queue_worker')
 except NameError:
     import params as P  # type: ignore
     import wire  # type: ignore
@@ -207,6 +208,7 @@ except NameError:
     import lora_triggers  # type: ignore
     import ws_client as ws_client_mod  # type: ignore
     import telemetry as telemetry_mod  # type: ignore
+    import queue_worker as queue_worker_mod  # type: ignore
 
 
 # Scheduled-curve helpers. Module-level so they're testable without TD
@@ -483,6 +485,19 @@ class DemonExt:
         self._last_drain_t: float = 0.0
         self._last_health_log: float = 0.0
 
+        # Queue-heartbeat worker (hosted mode). Does the /api/queue/status
+        # + /extend HTTP on a background thread; results come back through
+        # _inbound as hb-status / hb-error / hb-extend events. The worker
+        # reads ONLY these plain attributes (never TD pars):
+        self._queue_base: str = ""          # snapshotted at join time
+        self._hb_worker = None              # queue_worker_mod.QueueHeartbeatWorker
+        self._hb_extend_requested: bool = False
+        # ("auto", pre_extensions_used) | ("user", None) — set when the
+        # extend flag is raised, consumed by _apply_extend_result to run
+        # the denied-auto-extend backoff only for auto requests.
+        self._hb_extend_ctx: tuple = ("user", None)
+        self._last_hb_ensure_t: float = 0.0
+
         # Inbound message queue — populated by the WS recv thread, drained
         # on the main TD thread (OnTick / 8 ms timer). TD forbids touching
         # any operator from a non-main thread, so we MUST marshal here.
@@ -634,18 +649,24 @@ class DemonExt:
         mode = (self._read_par("Mode", "direct") or "direct").lower()
         prev_sid = self._session_id
 
-        # Always release the dead queue session in hosted mode. (Cheap;
-        # fire-and-forget. The leave call itself is HTTP and fine to
-        # run on the main thread.)
+        # Always release the dead queue session in hosted mode. The
+        # leave() call is HTTP (fresh TLS, up to 10 s timeout) — run it
+        # on a fire-and-forget thread so a slow/unreachable queue API
+        # can't stall the main thread while the LoopBuffer is still
+        # playing. Same pattern as the queue-claim thread below.
         base = self._read_par("Baseurl", "https://music.daydream.live")
         api_key = self._api_key or None
         if mode == "hosted" and prev_sid:
-            try:
-                queue_mod.QueueClient(
-                    base, api_key=api_key,
-                ).leave(prev_sid)
-            except queue_mod.QueueError:
-                pass
+            def _leave_worker(b=base, k=api_key, sid=prev_sid):
+                try:
+                    queue_mod.QueueClient(b, api_key=k).leave(sid)
+                except Exception:
+                    pass
+            threading.Thread(
+                target=_leave_worker,
+                name=f"queue-leave-{prev_sid[:8]}",
+                daemon=True,
+            ).start()
             self._session_id = None
             self._write_par("Queueposition", 0)
             self._write_par("Expiresin", 0.0)
@@ -718,6 +739,9 @@ class DemonExt:
         only the queue plumbing.
         """
         self._write_par("Denyreason", "")
+        # Snapshot the queue base for the heartbeat worker (which must
+        # never read TD pars). Main-thread write, GIL-atomic reads.
+        self._queue_base = base
         if is_retry:
             self._set_status(
                 f"Pod failover {self._failover_attempts}/{MAX_FAILOVER_ATTEMPTS} — "
@@ -785,6 +809,10 @@ class DemonExt:
 
         self._set_status("Connecting to hosted pod...")
         self._open_ws(self._ws_url)
+        # Start the heartbeat worker now (it idles until _connected
+        # flips True on WS open, then polls every 5 s).
+        self._hb_extend_requested = False
+        self._ensure_hb_worker()
         return True
 
     @staticmethod
@@ -824,6 +852,17 @@ class DemonExt:
         except Exception as e:
             self.log(f"speaker_out stop raised: {e}")
 
+        # Stop the heartbeat worker — the session it polls is gone. It
+        # would idle harmlessly anyway (get_state returns None), but a
+        # clean stop keeps the thread count honest. _ensure_hb_worker
+        # recreates it on the next hosted Connect.
+        w = self._hb_worker
+        if w is not None:
+            try:
+                w.stop()
+            except Exception:
+                pass
+
         # Outside the lock: blocking I/O.
         if wsc is not None:
             try:
@@ -838,15 +877,22 @@ class DemonExt:
         # be released so the pod is returned to the pool. (Direct mode has
         # no session_id so this is skipped.) Use Baseurl, not Serverurl —
         # Serverurl is the local-pod ws:// in direct mode and has no
-        # /api/queue/* surface.
+        # /api/queue/* surface. Fire-and-forget thread: leave() is HTTP
+        # with a 10 s timeout and must not freeze the TD UI.
         if session_id:
             base = self._read_par("Baseurl", "https://music.daydream.live")
-            try:
-                queue_mod.QueueClient(base, api_key=self._api_key or None).leave(
-                    session_id
-                )
-            except queue_mod.QueueError:
-                pass
+
+            def _leave_worker(b=base, k=(self._api_key or None),
+                              sid=session_id):
+                try:
+                    queue_mod.QueueClient(b, api_key=k).leave(sid)
+                except Exception:
+                    pass
+            threading.Thread(
+                target=_leave_worker,
+                name=f"queue-leave-{session_id[:8]}",
+                daemon=True,
+            ).start()
 
         self._write_par("Queueposition", 0)
         self._write_par("Expiresin", 0.0)
@@ -1640,50 +1686,83 @@ class DemonExt:
             self.log(f"OnTick send error: {e}")
 
     def OnHeartbeat(self) -> None:
-        """Called by the 5s heartbeat Timer CHOP. Polls /api/queue/status
-        and honors server-side state transitions.
+        """Timer CHOP compat shim. Heartbeat HTTP now runs on a
+        background worker (src/queue_worker.py) — the synchronous
+        /api/queue/status poll used to block the TD main thread for an
+        HTTPS round-trip (fresh TLS handshake!) every 5 s, stalling the
+        params keepalive AND slice patching: the periodic "occasionally
+        choppy" audio. This shim just makes sure the worker is alive."""
+        self._last_heartbeat_t = time.time()
+        self._ensure_hb_worker()
 
-        Only runs in hosted mode (direct mode has no sessionId). Mirrors
-        rtmg-vst's RTMGSession::applyResult for the active/queued/over_budget
-        state machine — the server can demote us from active to queued
-        (lost reservation) or over_budget (paywall) and we surface that
-        in the UI even if the WS is still notionally open.
-
-        Server eviction policy (per demon-public-demo/hooks/useQueue.ts):
-        polling /api/queue/status IS the heartbeat. If `lastHeartbeat` is
-        older than QUEUE_HEARTBEAT_TIMEOUT_MS (30 s default), the server
-        evicts the session and closes the WS. So we MUST be calling this
-        every <30 s for the lifetime of the session.
-        """
-        mode = (self._read_par("Mode", "direct") or "direct").lower()
-        if mode != "hosted" or not self._connected or not self._session_id:
-            # Still mark the call so the frame-exec fallback knows
-            # the Timer CHOP is alive — no need to double-fire.
-            self._last_heartbeat_t = time.time()
-            return
-        base = self._read_par("Baseurl", "https://music.daydream.live")
-        try:
-            resp = queue_mod.QueueClient(base, api_key=self._api_key or None).status(
-                self._session_id
-            )
-        except queue_mod.QueueError as e:
-            # Transient — keep the WS alive, retry on the next 5 s tick.
-            # Still record the attempt so the fallback driver doesn't
-            # pile on top of a flapping network.
-            self._last_heartbeat_t = time.time()
-            self.log(f"Heartbeat poll failed: {e}")
+    def _ensure_hb_worker(self) -> None:
+        """Create/start the heartbeat worker if it isn't running.
+        Idempotent + cheap (an is_alive check); the frame driver calls
+        this on a ~1 s throttle as belt-and-suspenders, same philosophy
+        as MaybeTickFromFrame. The worker itself idles (0.5 s poll of
+        get_state) while there's no hosted session, so it's safe to
+        keep alive across reconnects."""
+        w = self._hb_worker
+        if w is not None and w.is_alive:
             return
 
-        # Record successful poll — the server's eviction timer is now
-        # reset on its side, and the frame-exec fallback should skip
-        # until the next 5 s window.
+        # Closures read ONLY plain attributes — the worker thread must
+        # never touch TD pars. _queue_base/_api_key/_session_id are
+        # written on the main thread; reads are GIL-atomic.
+        def _get_state():
+            if not self._connected or not self._session_id:
+                return None
+            return (self._queue_base or "https://music.daydream.live",
+                    self._api_key or None,
+                    self._session_id)
+
+        def _pop_extend():
+            # Only the main thread sets True; only the worker clears.
+            if self._hb_extend_requested:
+                self._hb_extend_requested = False
+                return True
+            return False
+
+        self._hb_worker = queue_worker_mod.QueueHeartbeatWorker(
+            get_state=_get_state,
+            pop_extend_flag=_pop_extend,
+            post_event=lambda kind, payload: self._inbound.put(
+                (kind, payload)),
+            client_factory=lambda base, key: queue_mod.QueueClient(
+                base, api_key=key),
+            stats=self._stats,
+            log=self.log,
+        )
+        self._hb_worker.start()
+        if self._debug_enabled:
+            self.log("[hb-worker] started")
+
+    def _request_extend(self, auto: bool = False) -> None:
+        """Ask the heartbeat worker to POST /api/queue/extend on its next
+        cycle (≤5 s away — fine against the 60 s auto-extend threshold).
+        Replaces the old synchronous _extend_session (main-thread HTTP)."""
+        if not self._session_id:
+            self.log("extend: no session id (not in hosted mode?)")
+            return
+        self._hb_extend_ctx = (
+            ("auto", self._extensions_used) if auto else ("user", None))
+        self._hb_extend_requested = True
+        if not auto:
+            self._set_status("Extending session...")
+        self._ensure_hb_worker()
+
+    def _apply_queue_status(self, resp, dur_ms: float) -> None:
+        """Main-thread handler for an `hb-status` event. All the TD par
+        writes / status transitions from the old OnHeartbeat live here,
+        unchanged in behavior — only the HTTP moved off-thread."""
+        if not self._connected:
+            return  # stale poll result raced a disconnect — drop it
         self._last_heartbeat_t = time.time()
         self._heartbeat_count += 1
 
-        # Periodic "still alive" log so a future regression where
-        # OnHeartbeat stops firing is visible in textport instead of
-        # silently letting sessions die. Debug-gated and throttled to
-        # 1st + every 30 s (every 6th tick at the 5 s cadence).
+        # Periodic "still alive" log so a regression where heartbeats
+        # stop is visible in textport instead of silently letting
+        # sessions die. Debug-gated, 1st + every 6th (~30 s at 5 s).
         if self._debug_enabled and (
             self._heartbeat_count == 1 or self._heartbeat_count % 6 == 0
         ):
@@ -1694,7 +1773,8 @@ class DemonExt:
             self.log(
                 f"[heartbeat] #{self._heartbeat_count} ok "
                 f"status={resp.status} expires_in={expires_in:.0f}s "
-                f"extensions={self._extensions_used}"
+                f"extensions={self._extensions_used} "
+                f"http={dur_ms:.0f}ms"
             )
 
         if resp.status == "active":
@@ -1708,14 +1788,11 @@ class DemonExt:
                 resp.extensions_used or self._extensions_used
             )
 
-            # Auto-extend: when the user has the Auto-extend toggle on,
-            # pre-emptively pulse extend before the lease expires. Threshold
-            # is 60 s — gives the request plenty of time to complete plus
-            # a retry window if it fails. The server's MAX_EXTENSIONS cap
-            # is the natural backstop; once we hit it, `_extend_session`
-            # surfaces the error via Status and we stop trying (the
-            # `_auto_extend_backoff_until` guard below prevents looping
-            # on a denied extend for the rest of the session).
+            # Auto-extend: pre-emptively extend before the lease expires.
+            # Threshold is 60 s — plenty of margin for the worker's ≤5 s
+            # pickup plus the request itself. The denied-extend backoff
+            # (set in _apply_extend_result) prevents looping once the
+            # server stops granting extensions.
             try:
                 auto_extend = bool(self._read_par("Autoextend", True))
             except Exception:
@@ -1724,38 +1801,17 @@ class DemonExt:
                 auto_extend
                 and expires_in_s > 0.0
                 and expires_in_s < 60.0
+                and not self._hb_extend_requested
                 and time.time() >= getattr(
                     self, "_auto_extend_backoff_until", 0.0)
             ):
                 if self._debug_enabled:
                     self.log(
                         f"[auto-extend] expires_in={expires_in_s:.0f}s "
-                        f"< 60s — pulsing extend "
+                        f"< 60s — requesting extend "
                         f"(extensions_used={self._extensions_used})"
                     )
-                # Track the pre-extend extensions count; if `extend`
-                # comes back with the same number, the server denied
-                # silently (or hit MAX_EXTENSIONS) and we should back
-                # off to avoid hammering until the session ends.
-                pre_used = self._extensions_used
-                try:
-                    self._extend_session()
-                except Exception as e:
-                    self.log(f"[auto-extend] _extend_session raised: {e}")
-                    # Network blip — try again on the next heartbeat.
-                    self._auto_extend_backoff_until = time.time() + 5.0
-                else:
-                    if self._extensions_used == pre_used:
-                        # Extend didn't bump the counter — server rejected
-                        # (likely MAX_EXTENSIONS). Back off for the rest
-                        # of this session to avoid log spam.
-                        self.log(
-                            "[auto-extend] extend didn't increment "
-                            "extensions_used — backing off until next "
-                            "session"
-                        )
-                        self._auto_extend_backoff_until = (
-                            time.time() + 24 * 3600)
+                self._request_extend(auto=True)
         elif resp.status == "queued":
             # Reservation lost server-side. Surface for awareness; leave
             # the WS alone — the server will close it if it actually
@@ -1781,18 +1837,51 @@ class DemonExt:
                 f"WS close is the terminal signal, not a status poll)"
             )
 
+    def _apply_extend_result(self, payload) -> None:
+        """Main-thread handler for an `hb-extend` event:
+        ("ok", QueueResponse) | ("err", message)."""
+        kind, data = payload
+        ctx_kind, pre_used = self._hb_extend_ctx
+        auto = (ctx_kind == "auto")
+        if kind == "err":
+            self.log(f"Extend failed: {data}")
+            if auto:
+                # Network blip — retry on a later heartbeat.
+                self._auto_extend_backoff_until = time.time() + 5.0
+            else:
+                self._set_status(f"Extend failed: {data}")
+            return
+        resp = data
+        if resp.expires_at:
+            self._expires_at_ms = resp.expires_at
+            now_ms = time.time() * 1000.0
+            self._write_par(
+                "Expiresin",
+                max(0.0, (resp.expires_at - now_ms) / 1000.0),
+            )
+        self._extensions_used = resp.extensions_used or self._extensions_used
+        if auto:
+            if pre_used is not None and self._extensions_used == pre_used:
+                # Extend didn't bump the counter — server rejected
+                # (likely MAX_EXTENSIONS). Back off for the rest of
+                # this session to avoid log spam.
+                self.log(
+                    "[auto-extend] extend didn't increment "
+                    "extensions_used — backing off until next session"
+                )
+                self._auto_extend_backoff_until = time.time() + 24 * 3600
+        else:
+            self._set_status("Extended")
+
     def MaybeHeartbeatFromFrame(self) -> None:
-        """Belt-and-suspenders heartbeat driver, called from frame_exec's
-        onFrameStart every TD frame (~16 ms).
+        """Belt-and-suspenders heartbeat-WORKER keeper, called from
+        frame_exec's onFrameStart every TD frame (~16 ms).
 
-        Cheap no-op in the common case: when the Timer CHOP is firing
-        OnHeartbeat normally, `_last_heartbeat_t` is fresh and we return
-        immediately. Only when the Timer CHOP misbehaves (as it did
-        silently through v0.2.5 with the wrong callback name) do we
-        actually poll. Throttled to 5 s to match the Timer CHOP cadence.
-
-        Skipping in direct mode is handled inside OnHeartbeat — we still
-        want it to mark `_last_heartbeat_t` so this driver no-ops.
+        The heartbeat HTTP itself runs on the background worker; this
+        just makes sure that worker thread is alive (it could die only
+        to a catastrophic failure, but the params stream taught us to
+        never trust a single driver). Throttled to ~1 s; cheap no-op
+        when there's no hosted session.
         """
         # No hosted session = nothing to keep alive. Don't even check
         # the throttle window; spammy no-ops here happen 60×/sec.
@@ -1802,20 +1891,14 @@ class DemonExt:
         if mode != "hosted":
             return
         now = time.time()
-        if now - self._last_heartbeat_t < 5.0:
+        if now - self._last_hb_ensure_t < 1.0:
             return
-        # Timer CHOP didn't fire for >5 s. Drive the heartbeat manually.
-        # First time this kicks in, surface it so we know the fallback
-        # actually saved us.
-        if self._heartbeat_count == 0 and self._debug_enabled:
-            self.log(
-                "[heartbeat] Timer CHOP appears silent — "
-                "driving from frame_exec fallback"
-            )
+        self._last_hb_ensure_t = now
         try:
-            self.OnHeartbeat()
+            self._ensure_hb_worker()
         except Exception as e:
-            self.log(f"MaybeHeartbeatFromFrame: OnHeartbeat raised: {e}")
+            self.log(f"MaybeHeartbeatFromFrame: _ensure_hb_worker "
+                     f"raised: {e}")
 
     def MaybeTickFromFrame(self) -> None:
         """Drive OnTick from frame_exec's onFrameStart when the Timer CHOP
@@ -2043,6 +2126,18 @@ class DemonExt:
                     self.log(f"[ws_client] closed code={code} reason={reason!r}")
                     self._connected = False
                     self._handle_ws_close(reason)
+                elif kind == "hb-status":
+                    resp, dur_ms = payload
+                    self._apply_queue_status(resp, dur_ms)
+                elif kind == "hb-error":
+                    msg, dur_ms = payload
+                    # Transient — keep the WS alive; the worker retries
+                    # on its next 5 s cycle. Mark the attempt so the
+                    # "still alive" bookkeeping doesn't pile on.
+                    self._last_heartbeat_t = time.time()
+                    self.log(f"Heartbeat poll failed: {msg}")
+                elif kind == "hb-extend":
+                    self._apply_extend_result(payload)
                 elif kind == "failover-tick":
                     # Failover worker (spawned by _handle_ws_close) is
                     # back on the main thread asking us to re-call the
@@ -3217,7 +3312,7 @@ class DemonExt:
             # v0.2.5 (fewer moving parts; the dashboard URL is a one-click
             # copy anyway).
             "Pasteapikey": lambda: self.PromptForApiKey(),
-            "Stillplaying": lambda: self._extend_session(),
+            "Stillplaying": lambda: self._request_extend(auto=False),
             "Sendprompt": lambda: self.SendPrompt(),
             "Setpromptblend": lambda: self.SetPromptBlend(),
             "Swapsource": lambda: self.SwapSource(),
@@ -3237,33 +3332,9 @@ class DemonExt:
             except Exception as e:
                 self.log(f"Pulse {name} failed: {e}")
 
-    def _extend_session(self) -> None:
-        """Bump the hosted session's lifetime via POST /api/queue/extend.
-
-        No-op in direct mode (no sessionId). Reads Baseurl (the hosted API
-        root), not Serverurl, so this works after the WS is already open
-        to a signed wss:// URL.
-        """
-        if not self._session_id:
-            self.log("_extend_session: no session id (not in hosted mode?)")
-            return
-        base = self._read_par("Baseurl", "https://music.daydream.live")
-        try:
-            resp = queue_mod.QueueClient(base, api_key=self._api_key or None).extend(
-                self._session_id
-            )
-            if resp.expires_at:
-                self._expires_at_ms = resp.expires_at
-                now_ms = time.time() * 1000.0
-                self._write_par(
-                    "Expiresin",
-                    max(0.0, (resp.expires_at - now_ms) / 1000.0),
-                )
-            self._extensions_used = resp.extensions_used or self._extensions_used
-            self._set_status("Extended")
-        except queue_mod.QueueError as e:
-            self.log(f"Extend failed: {e}")
-            self._set_status(f"Extend failed: {e}")
+    # NOTE: the old synchronous `_extend_session` (main-thread HTTP) was
+    # replaced by `_request_extend` + the heartbeat worker; results land
+    # in `_apply_extend_result` via the `hb-extend` event.
 
     # -------- helpers --------------------------------------------------------
 
