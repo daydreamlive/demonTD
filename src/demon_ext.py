@@ -1525,15 +1525,13 @@ class DemonExt:
                 buf_s = buffered / wire.SAMPLE_RATE
                 self.log(f"buffered={buffered} samples ({buf_s:.2f}s)")
 
-        # Audio-thread latency telemetry (~1 s cadence, Debug-gated).
-        # Lets us confirm the zero-alloc pa_callback is actually fast
-        # in the user's environment — if max_ms ever creeps near the
-        # PortAudio deadline (frames_per_buffer / sr * 1000), we have
-        # evidence to chase the next contention source (lock with WS
-        # thread, system audio interrupt, etc.). The drain itself is
-        # cheap (a few int reads + resets) and tolerates a tiny race
-        # with the audio thread; worst case is one sample skewed.
-        if self._debug_enabled and self._connected:
+        # Audio-thread latency telemetry (~1 s cadence). The drain itself
+        # is ALWAYS on (cheap: a few int reads + resets, tolerates a tiny
+        # race with the audio thread) because the audio callback no
+        # longer logs underruns itself — this is the only place they
+        # surface. Underruns get an always-on throttled warn; the
+        # verbose latency line stays Debug-gated.
+        if self._connected:
             now = time.time()
             last_lat = getattr(self, "_last_lat_log", 0.0)
             if now - last_lat > 1.0:
@@ -1543,15 +1541,27 @@ class DemonExt:
                 except Exception:
                     stats = None
                 if stats:
-                    warn = " (OVER max_block_frames!)" if stats[
-                        "over_max_block"] else ""
-                    self.log(
-                        f"[speaker_out] cb_latency "
-                        f"n={stats['n']} "
-                        f"mean={stats['mean_ms']:.2f}ms "
-                        f"max={stats['max_ms']:.2f}ms "
-                        f"underruns_total={stats['underruns_total']}{warn}"
-                    )
+                    new_underruns = stats.get("underruns_since_drain", 0)
+                    if new_underruns > 0 and (
+                            now - getattr(self, "_last_underrun_warn", 0.0)
+                            > 5.0):
+                        self._last_underrun_warn = now
+                        self.log(
+                            f"[speaker_out] {new_underruns} underrun(s) "
+                            f"in the last ~1s "
+                            f"(total={stats['underruns_total']}, "
+                            f"cb_max={stats['max_ms']:.2f}ms)"
+                        )
+                    if self._debug_enabled:
+                        warn = " (OVER max_block_frames!)" if stats[
+                            "over_max_block"] else ""
+                        self.log(
+                            f"[speaker_out] cb_latency "
+                            f"n={stats['n']} "
+                            f"mean={stats['mean_ms']:.2f}ms "
+                            f"max={stats['max_ms']:.2f}ms "
+                            f"underruns_total={stats['underruns_total']}{warn}"
+                        )
 
         # Slice-coverage telemetry. Diagnostic for the "random source
         # flashes during playback" reports. If coverage stays below

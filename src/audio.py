@@ -873,6 +873,9 @@ class SpeakerOut:
         self._cb_count_since_drain: int = 0
         self._cb_latency_sum_ns: int = 0
         self._cb_latency_max_ns: int = 0
+        # Watermark for drain_latency_stats' underruns_since_drain delta
+        # (only ever touched by the main thread inside the drain).
+        self._underruns_at_last_drain: int = 0
         # Underrun-by-rate-mismatch hint — set True if a callback ever
         # asks for more frames than _max_block_frames. Visible in the
         # next telemetry report.
@@ -1402,17 +1405,12 @@ class SpeakerOut:
         self._cb_count_since_drain += 1
 
         if status_flags & _paOutputUnderflow:
+            # Counter only — NEVER log from the audio thread. An f-string
+            # + print here is blocking I/O at exactly the moment the
+            # callback is already late, which turns one underrun into a
+            # cascade. The main thread reports these via
+            # drain_latency_stats() (underruns_since_drain).
             self._underrun_count += 1
-            # Always-on log so every stutter shows up immediately in the
-            # textport (we used to gate this every 50, which hid them).
-            try:
-                self._log(
-                    f"[speaker_out] underrun "
-                    f"(count={self._underrun_count}, "
-                    f"cb={self._callback_count}, frames={frames})"
-                )
-            except Exception:
-                pass
 
         n = int(frames)
         is_int16 = (self._sample_format_pa == _paInt16)
@@ -1435,46 +1433,57 @@ class SpeakerOut:
             return _paContinue
 
         try:
+            # Unified chunked fill: produce the block through the
+            # pre-allocated scratch in <= _max_block_frames pieces.
+            # The normal case (n <= _max_block_frames) is the single-pass
+            # degenerate loop; an outsized callback (device chose a
+            # bigger block than we planned for) walks the output buffer
+            # in scratch-sized chunks. Sequential read_into calls are
+            # bit-identical to one big read — the seam crossfade is
+            # position-based, not call-based. Zero allocations either
+            # way: the old fallback called `self._loop.read(n)` (a GC
+            # hazard on the audio thread) and then raised on the
+            # too-small interleave scratch, playing the block as
+            # SILENCE. Now it just takes extra passes.
             if n > self._max_block_frames:
-                # Outsized callback — flag for telemetry and fall back
-                # to a per-call alloc. Shouldn't happen with our open
-                # parameters but the audio thread can never fail to
-                # produce output, so we accept the one-time alloc.
                 self._cb_over_max_block = True
-                pcm_view = self._loop.read(n)  # (channels, n) float32
-            else:
-                pcm_view = self._scratch_pcm[:, :n]
+            bytes_per_frame = self._channels * bytes_per_sample
+            dst = out_buf
+            remaining = n
+            while remaining > 0:
+                m = remaining if remaining <= self._max_block_frames \
+                    else self._max_block_frames
+                pcm_view = self._scratch_pcm[:, :m]
                 self._loop.read_into(pcm_view)
-
-            if is_int16:
-                # In-place clip + scale → pcm_view holds float32 values
-                # in [-32768, 32767] range.
-                np.clip(pcm_view, -1.0, 1.0, out=pcm_view)
-                np.multiply(pcm_view, 32767.0, out=pcm_view)
-                # Interleave + cast to int16. The 2D reshape view into
-                # the pre-allocated 1D scratch is free. `np.copyto` with
-                # `casting="unsafe"` does an in-place float32→int16
-                # truncation; the explicit clip above is what makes
-                # truncation safe (no wraparound on out-of-range floats).
-                view_i16 = self._scratch_interleaved_i16[
-                    :n * self._channels].reshape(n, self._channels)
-                np.copyto(view_i16, pcm_view.T, casting="unsafe")
-                _ctypes.memmove(
-                    out_buf,
-                    self._scratch_interleaved_i16.ctypes.data,
-                    n_bytes,
-                )
-            else:
-                # float32 interleave: copy pcm_view.T (a non-contiguous
-                # strided view) into the contiguous interleaved scratch.
-                view_f32 = self._scratch_interleaved_f32[
-                    :n * self._channels].reshape(n, self._channels)
-                np.copyto(view_f32, pcm_view.T)
-                _ctypes.memmove(
-                    out_buf,
-                    self._scratch_interleaved_f32.ctypes.data,
-                    n_bytes,
-                )
+                if is_int16:
+                    # In-place clip + scale → pcm_view holds float32
+                    # values in [-32767, 32767] range. The explicit clip
+                    # is what makes the unsafe float32→int16 cast below
+                    # safe (no wraparound on out-of-range floats).
+                    np.clip(pcm_view, -1.0, 1.0, out=pcm_view)
+                    np.multiply(pcm_view, 32767.0, out=pcm_view)
+                    view_i16 = self._scratch_interleaved_i16[
+                        :m * self._channels].reshape(m, self._channels)
+                    np.copyto(view_i16, pcm_view.T, casting="unsafe")
+                    _ctypes.memmove(
+                        dst,
+                        self._scratch_interleaved_i16.ctypes.data,
+                        m * bytes_per_frame,
+                    )
+                else:
+                    # float32 interleave: copy pcm_view.T (a non-
+                    # contiguous strided view) into the contiguous
+                    # interleaved scratch.
+                    view_f32 = self._scratch_interleaved_f32[
+                        :m * self._channels].reshape(m, self._channels)
+                    np.copyto(view_f32, pcm_view.T)
+                    _ctypes.memmove(
+                        dst,
+                        self._scratch_interleaved_f32.ctypes.data,
+                        m * bytes_per_frame,
+                    )
+                dst += m * bytes_per_frame
+                remaining -= m
         except Exception:
             # Any failure: write silence so the audio thread doesn't break.
             try:
@@ -1509,10 +1518,14 @@ class SpeakerOut:
         self._cb_latency_sum_ns = 0
         self._cb_latency_max_ns = 0
         self._cb_over_max_block = False
+        underruns_total = self._underrun_count
+        underruns_since = underruns_total - self._underruns_at_last_drain
+        self._underruns_at_last_drain = underruns_total
         return {
             "n": n,
             "mean_ms": (sum_ns / n) / 1_000_000.0,
             "max_ms": max_ns / 1_000_000.0,
             "over_max_block": over,
-            "underruns_total": self._underrun_count,
+            "underruns_total": underruns_total,
+            "underruns_since_drain": underruns_since,
         }
