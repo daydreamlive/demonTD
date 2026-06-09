@@ -48,15 +48,21 @@ def _get_json(url: str, headers: dict, timeout: float = 15.0) -> dict:
     )
     try:
         with urlrequest.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            raw = resp.read().decode("utf-8", errors="replace")
     except urlerror.HTTPError as e:
         try:
-            err_body = e.read().decode("utf-8")
+            err_body = e.read().decode("utf-8", errors="replace")
         except Exception:
-            err_body = ""
+            err_body = "(unable to read error body)"
         raise OAuthError(f"HTTP {e.code}: {err_body}") from e
     except urlerror.URLError as e:
         raise OAuthError(f"Network error: {e}") from e
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        # A 200 with a malformed body must surface as OAuthError (the
+        # caller shows it in the UI), not a raw JSONDecodeError.
+        raise OAuthError(f"Bad JSON from {url}: {raw[:200]}") from e
 
 
 def fetch_profile(api_key: str) -> dict:

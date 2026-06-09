@@ -120,3 +120,37 @@ def test_outbound_overflow_drops_oldest():
     payloads = [p for (p, _op) in c._ws.sent]
     assert "newest" in payloads
     assert "m0" not in payloads
+
+
+def test_close_then_connect_does_not_resurrect_closing_flag_race():
+    """connect()/close() lifecycle is serialized by _lifecycle_lock:
+    after close() (no live thread), connect() may legitimately start a
+    NEW session — but close() must always leave _closing=True until a
+    deliberate connect(), and connect() while a live thread runs must
+    not touch the flag."""
+    c = _make_client()
+    c.close()
+    assert c._closing is True
+    # A deliberate reconnect resets the flag under the lock.
+    c.connect()
+    try:
+        assert c._closing is False
+    finally:
+        c.close()
+
+
+def test_connect_ignored_while_thread_alive_preserves_closing_request():
+    import threading as _threading
+
+    c = wsc_mod.WSClient("ws://test/")
+    # Fake an alive recv thread so connect() takes the ignore branch.
+    ev = _threading.Event()
+    t = _threading.Thread(target=ev.wait, daemon=True)
+    t.start()
+    c._thread = t
+    c._closing = True  # a close() was requested
+    c.connect()
+    # connect() must NOT have reset the in-flight close request.
+    assert c._closing is True
+    ev.set()
+    t.join(timeout=2.0)

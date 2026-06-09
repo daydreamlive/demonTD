@@ -195,3 +195,68 @@ def test_decode_control_valid():
 def test_decode_control_invalid_dict():
     msg = wire.decode_control('"not an object"')
     assert msg["type"] == "_invalid"
+
+
+# -----------------------------------------------------------------------------
+# encode_params NaN/Inf sanitization (must never emit invalid JSON —
+# this message is the keepalive; a sticky NaN would poison every send)
+# -----------------------------------------------------------------------------
+def test_encode_params_drops_nan_and_inf_values():
+    msg = wire.encode_params(
+        {"denoise": float("nan"), "drums": float("inf"),
+         "bass": float("-inf"), "vocals": 0.5},
+        playback_pos=1.25,
+    )
+    parsed = json.loads(msg)  # would raise on bare NaN tokens
+    assert parsed["raw"] == {"vocals": 0.5}
+    assert parsed["playback_pos"] == 1.25
+
+
+def test_encode_params_finite_values_untouched():
+    msg = wire.encode_params({"denoise": 0.7, "seed": 42, "tag": "x"},
+                             playback_pos=0.0)
+    parsed = json.loads(msg)
+    assert parsed["raw"] == {"denoise": 0.7, "seed": 42, "tag": "x"}
+
+
+def test_encode_params_nonfinite_playback_pos_clamped():
+    msg = wire.encode_params({}, playback_pos=float("nan"))
+    assert json.loads(msg)["playback_pos"] == 0.0
+
+
+def test_encode_params_never_raises_on_weird_raw():
+    # The pacer thread calls this in the keepalive loop — sanitization,
+    # not exceptions.
+    msg = wire.encode_params({"a": float("nan")}, playback_pos=2.0)
+    assert json.loads(msg)["raw"] == {}
+
+
+# -----------------------------------------------------------------------------
+# decode_slice payload-length validation
+# -----------------------------------------------------------------------------
+def _slice_frame(num_samples: int, channels: int, payload: bytes) -> bytes:
+    hdr = (struct.pack("<B", wire.SLICE_FLAG_RAW)
+           + struct.pack("<II", 0, num_samples)
+           + struct.pack("<H", channels)
+           + struct.pack("<ff", 0.0, 0.0)
+           + struct.pack("<I", 1))
+    return hdr + payload
+
+
+def test_decode_slice_accepts_exact_payload():
+    pcm16 = np.zeros(10 * 2, dtype=np.float16).tobytes()
+    s = wire.decode_slice(_slice_frame(10, 2, pcm16))
+    assert s.num_samples == 10
+    assert s.pcm.size == 20
+
+
+def test_decode_slice_rejects_truncated_payload():
+    pcm16 = np.zeros(10 * 2, dtype=np.float16).tobytes()
+    with pytest.raises(ValueError, match="size mismatch"):
+        wire.decode_slice(_slice_frame(10, 2, pcm16[:-4]))
+
+
+def test_decode_slice_rejects_overlong_payload():
+    pcm16 = np.zeros(10 * 2, dtype=np.float16).tobytes()
+    with pytest.raises(ValueError, match="size mismatch"):
+        wire.decode_slice(_slice_frame(10, 2, pcm16 + b"\x00\x00"))

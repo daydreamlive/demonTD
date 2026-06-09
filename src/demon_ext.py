@@ -441,7 +441,9 @@ class DemonExt:
         self._ring = audio_mod.LoopBuffer(
             channels=2, sample_rate=wire.SAMPLE_RATE,
         )
-        self._epoch: int = 0  # bumped on swap_ready; used to drop stale slices
+        # (No slice-epoch tracking needed: TCP FIFO + recv-thread
+        # routing means no old-track slice can arrive after swap_ready;
+        # the write-only _epoch counter was deleted.)
 
         # Python-side audio playback (bypasses TD's CHOP audio chain via
         # ctypes -> bundled PortAudio binary). Lifecycle is start()'d when
@@ -521,6 +523,16 @@ class DemonExt:
         # in _open_ws; binary routing state (expecting-initial, stem
         # skip counts) lives inside it, fed by recv-thread text sniffing.
         self._router = None  # binary_router_mod.BinaryRouter | None
+
+        # Connection generation. Each _open_ws bumps this; the WS
+        # callbacks stamp their events with the generation they were
+        # created under, and _drain_inbound DROPS events from older
+        # generations. Why: WSClient.close() joins its recv thread for
+        # only 2 s — a thread stuck in a long send (30 s timeout)
+        # lingers past that, and its late ("close", ...) event would
+        # otherwise set _connected=False and run close handling against
+        # the NEW session (spurious teardown / failover loop).
+        self._ws_gen: int = 0
 
         # Cached state of the `Debug` toggle on the Session page. When True,
         # verbose diagnostics are logged + WAV dumps go to /tmp/demon-debug/.
@@ -2157,13 +2169,17 @@ class DemonExt:
         )
 
         self._set_status(f"Opening {ws_url}...")
+        # New connection generation — events from older generations'
+        # recv threads are dropped in _drain_inbound (see _ws_gen).
+        self._ws_gen += 1
+        gen = self._ws_gen
         try:
             self._wsc = ws_client_mod.WSClient(
                 url=ws_url,
-                on_open=self._on_ws_open,
-                on_text=self._on_ws_text,
-                on_binary=self._on_ws_binary,
-                on_close=self._on_ws_close,
+                on_open=lambda g=gen: self._on_ws_open(g),
+                on_text=lambda m, g=gen: self._on_ws_text(m, g),
+                on_binary=lambda b, g=gen: self._on_ws_binary(b, g),
+                on_close=lambda c, r, g=gen: self._on_ws_close(c, r, g),
                 log=self.log,
                 timeout=30.0,
             )
@@ -2185,10 +2201,10 @@ class DemonExt:
     # may even crash). All we do here is enqueue the event. The main thread
     # drains the queue from OnTick().
 
-    def _on_ws_open(self) -> None:
-        self._inbound.put(("open", None))
+    def _on_ws_open(self, gen: int | None = None) -> None:
+        self._inbound.put(("open", None, gen))
 
-    def _on_ws_text(self, msg: str) -> None:
+    def _on_ws_text(self, msg: str, gen: int | None = None) -> None:
         # Sniff FIRST (recv thread): ready/swap_ready/stem_assets set
         # the router's binary-routing state before the next binary frame
         # arrives on this same thread. The full text processing still
@@ -2196,9 +2212,9 @@ class DemonExt:
         r = self._router
         if r is not None:
             r.sniff_text(msg)
-        self._inbound.put(("text", msg))
+        self._inbound.put(("text", msg, gen))
 
-    def _on_ws_binary(self, payload: bytes) -> None:
+    def _on_ws_binary(self, payload: bytes, gen: int | None = None) -> None:
         # Decode + patch INLINE on the recv thread (TD-free; the
         # LoopBuffer has its own lock) — binary frames are NOT queued to
         # the main thread anymore, so slice patching survives TD
@@ -2207,10 +2223,18 @@ class DemonExt:
         if r is not None:
             r.handle_binary(payload)
         else:
-            self._inbound.put(("binary", payload))
+            self._inbound.put(("binary", payload, gen))
 
-    def _on_ws_close(self, code, reason) -> None:
-        self._inbound.put(("close", (code, reason)))
+    def _on_ws_close(self, code, reason, gen: int | None = None) -> None:
+        self._inbound.put(("close", (code, reason), gen))
+
+    @staticmethod
+    def event_is_stale(event_gen: int | None, current_gen: int) -> bool:
+        """True iff an _inbound event came from a previous connection's
+        recv thread and must be dropped. gen=None marks events that are
+        not connection-scoped (heartbeat results, failover ticks,
+        loop-initialized) — always processed."""
+        return event_gen is not None and event_gen != current_gen
 
     def _drain_inbound(self) -> None:
         """Main-thread per-frame work. Called by frame_exec every frame:
@@ -2233,9 +2257,19 @@ class DemonExt:
         max_per_tick = 64
         for _ in range(max_per_tick):
             try:
-                kind, payload = self._inbound.get_nowait()
+                item = self._inbound.get_nowait()
             except queue.Empty:
                 break
+            kind, payload = item[0], item[1]
+            ev_gen = item[2] if len(item) > 2 else None
+            if self.event_is_stale(ev_gen, self._ws_gen):
+                # A previous connection's recv thread limped past its
+                # 2 s close-join and enqueued late. Processing its
+                # "close" here would tear down the CURRENT session.
+                if self._debug_enabled:
+                    self.log(f"[ws] dropping stale {kind!r} event "
+                             f"(gen {ev_gen} != {self._ws_gen})")
+                continue
             try:
                 if kind == "open":
                     self.log("[ws_client] open — flushing config + audio")
@@ -2268,11 +2302,15 @@ class DemonExt:
                 elif kind == "failover-tick":
                     # Failover worker (spawned by _handle_ws_close) is
                     # back on the main thread asking us to re-call the
-                    # hosted-join flow with the same base + apiKey it
-                    # captured. payload is (base, api_key).
+                    # hosted-join flow. payload is (base, api_key) as
+                    # captured at close time — but prefer the CURRENT
+                    # api key: the user may have pasted a fresh one
+                    # during the backoff (retrying with the stale
+                    # captured key would fail auth).
                     base, api_key = payload
                     ok = self._hosted_join_and_open(
-                        base=base, api_key=api_key, is_retry=True)
+                        base=base, api_key=(self._api_key or api_key),
+                        is_retry=True)
                     if not ok:
                         # Join refused / paywall / etc. — give up
                         # rather than retry-stormulously. Status is

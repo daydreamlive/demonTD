@@ -22,6 +22,7 @@ returned as plain dicts; the caller inspects `msg["type"]`.
 from __future__ import annotations
 
 import json
+import math
 import struct
 from dataclasses import dataclass
 from typing import Any
@@ -119,10 +120,27 @@ def encode_params(raw: dict[str, Any], playback_pos: float) -> str:
     `playback_pos` is in SECONDS (matching demon-public-demo's
     useParamSync.ts which passes `session.player.positionSec`). The
     server uses it for absolute-time curve sampling.
+
+    NaN/Inf floats are DROPPED, never serialized: json.dumps would
+    happily emit `NaN`, which is not valid JSON — the server-side parse
+    fails silently and, since this message is the keepalive, a sticky
+    non-finite param would poison every keepalive until the pod gives
+    up on us. This function must never raise (it runs on the pacer
+    thread inside the keepalive loop), so we sanitize rather than
+    reject; `allow_nan=False` stays as the backstop for anything the
+    sweep misses (e.g. numpy scalars).
     """
+    if any(isinstance(v, float) and not math.isfinite(v)
+           for v in raw.values()):
+        raw = {k: v for k, v in raw.items()
+               if not (isinstance(v, float) and not math.isfinite(v))}
+    pos = float(playback_pos)
+    if not math.isfinite(pos):
+        pos = 0.0
     return json.dumps(
-        {"type": "params", "raw": raw, "playback_pos": float(playback_pos)},
+        {"type": "params", "raw": raw, "playback_pos": pos},
         separators=(",", ":"),
+        allow_nan=False,
     )
 
 
@@ -293,6 +311,17 @@ def decode_slice(buf: bytes, zstd_dec=None) -> SliceData:
         payload = zstd_dec.decompress(payload)
     elif flags != SLICE_FLAG_RAW:
         raise ValueError(f"Unknown slice flags: {flags}")
+
+    # Validate the (decompressed) payload against the header before
+    # touching it: a truncated frame would otherwise yield a SHORT pcm
+    # that gets silently patched into the loop (audible garbage), and
+    # an overlong one would smuggle extra samples past the header.
+    expected_bytes = num_samples * channels * 2  # float16
+    if len(payload) != expected_bytes:
+        raise ValueError(
+            f"slice payload size mismatch: got {len(payload)}B, header "
+            f"says {num_samples} samples x {channels}ch = {expected_bytes}B"
+        )
 
     # Defensive copy so the underlying buffer is 2-byte aligned for view().
     u16 = np.frombuffer(bytes(payload), dtype=np.uint16)

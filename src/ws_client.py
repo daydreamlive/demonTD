@@ -101,6 +101,12 @@ class WSClient:
         # down (set by close()). Kept so the actual socket .close() happens
         # on the recv thread — never concurrently with its recv.
         self._req_close_code = 1000
+        # Serializes connect()/close() lifecycle transitions. Without it
+        # a connect() racing a close() could reset `_closing` AFTER
+        # close() set it and start a thread that ignores the close
+        # request. (The socket itself stays single-threaded — this lock
+        # only covers the flag + thread start.)
+        self._lifecycle_lock = threading.Lock()
 
     # --- state ----------------------------------------------------------------
 
@@ -113,14 +119,16 @@ class WSClient:
 
     def connect(self) -> None:
         """Open the WS and start the recv thread. Non-blocking."""
-        if self._thread is not None and self._thread.is_alive():
-            self._log(f"[ws_client] connect ignored — thread already running")
-            return
-        self._closing = False
-        self._thread = threading.Thread(
-            target=self._run, name=f"ws_client[{self.url}]", daemon=True
-        )
-        self._thread.start()
+        with self._lifecycle_lock:
+            if self._thread is not None and self._thread.is_alive():
+                self._log(
+                    f"[ws_client] connect ignored — thread already running")
+                return
+            self._closing = False
+            self._thread = threading.Thread(
+                target=self._run, name=f"ws_client[{self.url}]", daemon=True
+            )
+            self._thread.start()
 
     def _run(self) -> None:
         try:
@@ -244,11 +252,15 @@ class WSClient:
         loop wakes within RECV_TIMEOUT, sees the flag, and closes with
         `_req_close_code`.
         """
-        self._req_close_code = code
-        self._closing = True
-        t = self._thread
-        # Don't join from the recv thread itself (e.g. when close() is
-        # reached via the on_close callback) — that raises RuntimeError.
+        with self._lifecycle_lock:
+            self._req_close_code = code
+            self._closing = True
+            t = self._thread
+        # Join OUTSIDE the lock (it can take up to 2 s; connect() must
+        # not block that long — it'll just see _closing/thread state
+        # consistently). Don't join from the recv thread itself (e.g.
+        # when close() is reached via the on_close callback) — that
+        # raises RuntimeError.
         if (t is not None and t.is_alive()
                 and threading.current_thread() is not t):
             t.join(timeout=2.0)

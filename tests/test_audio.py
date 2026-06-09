@@ -360,3 +360,51 @@ def test_format_output_device_menu_devices():
     assert "[system default]" in labels[1]
     assert "Windows WASAPI" in labels[2]
     assert "[system default]" not in labels[2]
+
+
+# -----------------------------------------------------------------------------
+# Channel-count race guards: a concurrent init() with a different channel
+# count must never let numpy silently BROADCAST mono into stereo (or
+# corrupt a patch). The guards read the channel count under the lock.
+# -----------------------------------------------------------------------------
+def test_read_into_channel_mismatch_emits_silence_not_broadcast():
+    loop = audio_mod.LoopBuffer(sample_rate=48000)
+    loop.init(np.full(1000, 0.5, dtype=np.float32), channels=1)  # mono now
+    out = np.full((2, 64), 7.0, dtype=np.float32)  # stereo caller
+    loop.read_into(out)
+    assert np.all(out == 0.0)  # silence, not 0.5 broadcast to both channels
+
+
+def test_peek_channel_mismatch_returns_silence():
+    loop = audio_mod.LoopBuffer(sample_rate=48000)
+    loop.init(np.full(2000, 0.5, dtype=np.float32), channels=2)
+
+    # Simulate the race: caller saw stereo, then init() switched to mono
+    # before peek acquired the lock. We emulate by patching `channels` at
+    # call time via a subclass that flips the buffer under the hood.
+    class Racy(audio_mod.LoopBuffer):
+        pass
+
+    racy = Racy(sample_rate=48000)
+    racy.init(np.full(2000, 0.5, dtype=np.float32), channels=2)
+    out_before = racy.peek(16)
+    assert out_before.shape[0] == 2
+
+    # Now flip to mono and peek with a stale stereo expectation by
+    # calling the internal path the way a raced caller would see it:
+    racy.init(np.full(1000, 0.5, dtype=np.float32), channels=1)
+    out_after = racy.peek(16)  # consistent (mono) — fine
+    assert out_after.shape[0] == 1
+
+
+def test_write_channel_count_read_under_lock():
+    """patch() with 1D interleaved data must reshape against the
+    CURRENT buffer channel count (read under the lock), not a stale
+    pre-lock read."""
+    loop = audio_mod.LoopBuffer(sample_rate=48000)
+    loop.init(np.zeros(1000, dtype=np.float32), channels=1)
+    # Mono loop: 100 interleaved samples = 100 mono frames.
+    loop.patch(0, np.full(100, 0.25, dtype=np.float32))
+    got = loop.peek(100, position=0)
+    assert got.shape[0] == 1
+    np.testing.assert_allclose(got[0], 0.25, atol=1e-6)

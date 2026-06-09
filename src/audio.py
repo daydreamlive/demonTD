@@ -284,26 +284,30 @@ class LoopBuffer:
 
     def _write(self, start_frame: int, pcm: np.ndarray, add: bool) -> None:
         pcm = np.ascontiguousarray(pcm, dtype=np.float32)
-        ch = self.channels
-        if pcm.ndim == 1:
-            n = pcm.shape[0] // ch
-            pcm_2d = pcm[: n * ch].reshape(n, ch).T
-        elif pcm.ndim == 2 and pcm.shape[0] == ch:
-            pcm_2d = pcm
-            n = pcm.shape[1]
-        elif pcm.ndim == 2 and pcm.shape[1] == ch:
-            pcm_2d = pcm.T
-            n = pcm.shape[0]
-        else:
-            return
-
-        if n <= 0:
-            return
-
         with self._lock:
             buf = self._buffer
             frames = self._frames
             if buf is None or frames == 0:
+                return
+            # Read the channel count INSIDE the lock — a concurrent
+            # init() with a different channel count between an unlocked
+            # read and the write below would make the shape math below
+            # silently wrong (mono broadcast into stereo, or a dropped
+            # patch).
+            ch = buf.shape[0]
+            if pcm.ndim == 1:
+                n = pcm.shape[0] // ch
+                pcm_2d = pcm[: n * ch].reshape(n, ch).T
+            elif pcm.ndim == 2 and pcm.shape[0] == ch:
+                pcm_2d = pcm
+                n = pcm.shape[1]
+            elif pcm.ndim == 2 and pcm.shape[1] == ch:
+                pcm_2d = pcm.T
+                n = pcm.shape[0]
+            else:
+                return
+
+            if n <= 0:
                 return
             start = start_frame % frames
             end = start + n
@@ -385,6 +389,13 @@ class LoopBuffer:
             frames = self._frames
             if buf is None or frames == 0:
                 # Caller's `out` may be uninitialized — explicitly silence.
+                out.fill(0.0)
+                return
+            if buf.shape[0] != out.shape[0]:
+                # Channel count changed under us (init() raced between
+                # the caller allocating `out` and this lock). Numpy
+                # would silently BROADCAST a mono buffer into a stereo
+                # `out` — emit silence for this one read instead.
                 out.fill(0.0)
                 return
 
@@ -472,6 +483,11 @@ class LoopBuffer:
             buf = self._buffer
             frames = self._frames
             if buf is None or frames == 0:
+                return out
+            if buf.shape[0] != ch:
+                # init() raced and changed the channel count between
+                # allocating `out` and taking the lock — silence beats
+                # numpy's silent mono→stereo broadcast.
                 return out
 
             pos = self._position if position is None else (position % frames)

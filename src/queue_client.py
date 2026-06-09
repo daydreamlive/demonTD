@@ -121,9 +121,9 @@ class QueueClient:
                 raw = resp.read().decode("utf-8")
         except urlerror.HTTPError as e:
             try:
-                err_body = e.read().decode("utf-8")
+                err_body = e.read().decode("utf-8", errors="replace")
             except Exception:
-                err_body = ""
+                err_body = "(unable to read error body)"
             raise QueueError(f"HTTP {e.code} on {method} {path}: {err_body}") from e
         except urlerror.URLError as e:
             raise QueueError(f"Network error on {method} {path}: {e}") from e
