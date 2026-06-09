@@ -15,5 +15,5 @@ demon_ext.py is the more detailed per-build fingerprint shown in the boot
 log; this is the clean semver advertised on the wire.
 """
 
-DEMON_TD_VERSION = "0.2.15"
+DEMON_TD_VERSION = "0.2.16"
 USER_AGENT = f"DaydreamDEMON-TD/{DEMON_TD_VERSION}"

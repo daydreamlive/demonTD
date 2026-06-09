@@ -2,6 +2,83 @@
 
 All notable changes to demonTD. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.16] — 2026-06-09
+
+### Big one: "occasionally choppy" audio — root causes found and fixed
+
+Everything except the PortAudio callback ran on TD's main thread, so
+any main-thread hitch degraded audio in two ways at once: the
+continuous params stream (the WS keepalive AND the server's pacing
+signal — `playback_pos` tells the pipeline where the playhead is,
+against a 0.25 s lead floor) went silent, and incoming slices stopped
+being patched, so the playhead played stale loop content. The biggest
+recurring hitch was ours: the hosted-session heartbeat ran a
+synchronous HTTPS poll (fresh TCP+TLS handshake, 10 s timeout) on the
+main thread **every 5 seconds**.
+
+- **Heartbeat HTTP off the main thread** — new `src/queue_worker.py`.
+  The `/api/queue/status` poll + auto-extend run on a worker thread;
+  results marshal back as `hb-*` events and all TD par writes / state
+  transitions stay on the main thread, logic unchanged. The queue
+  `leave()` calls (WS-close path and Disconnect) are fire-and-forget
+  threads now too.
+- **Dedicated params pacer thread** — new `src/params_pacer.py`,
+  ~16 ms cadence, immune to frame hitches. Sends via the enqueue-only
+  WS path (single-thread-socket preserved). Also fixes two latent
+  bugs: the params snapshot was starved (user edits never reached it),
+  and stale snapshot re-sends could stomp curve manual-overrides.
+  The main thread supervises (restart-if-dead, teardown on send-fail
+  streak) — same belt-and-suspenders philosophy as the old fallbacks.
+- **Slices decode + patch on the WS recv thread** — new
+  `src/binary_router.py`. ready/swap_ready/stem_assets are sniffed on
+  the recv thread so binary routing state is race-free; the initial
+  buffer inits the loop right there; only the SpeakerOut start (TD
+  par reads) marshals to the main thread. Old routers are detached on
+  reconnect so a lingering recv thread can't touch the new session's
+  ring. Per-connection zstd decompressor (the shared one isn't
+  concurrency-safe across overlapping recv threads).
+- **Audio-callback hygiene** (`src/audio.py`): the underrun branch no
+  longer logs from the audio thread (blocking I/O at the worst moment
+  — one underrun cascaded into several); underruns surface via an
+  always-on main-thread report instead. The oversized-callback
+  fallback was broken — it allocated AND raised on a too-small
+  scratch, playing the whole block as **silence**; replaced with a
+  zero-allocation chunked fill that's bit-identical at any block size.
+- **Smoothness telemetry** — new `src/telemetry.py`. A `[health]` line
+  (~5 s) reports params-send gaps, slice patch lead vs playhead (late
+  patches = the "music glitch" chop), main-thread hitch size,
+  heartbeat HTTP duration, and underrun deltas. Quiet unless degraded;
+  full line in Debug mode. If chop ever comes back, this names the
+  subsystem.
+
+### Bug sweep (three adversarial review passes over the whole codebase)
+
+- **Stale-connection events could kill a fresh session** (HIGH): a
+  recv thread outliving `close()`'s 2 s join could enqueue a late
+  `close` event that tore down the NEW session. Events now carry a
+  connection generation; stale ones are dropped.
+- `wire.encode_params` emitted invalid JSON on NaN/Inf params — and
+  this message is the keepalive. Non-finite values are dropped
+  (never raises on the pacer path), `allow_nan=False` backstop.
+- `wire.decode_slice` now validates payload length against the header
+  — a truncated frame used to patch short garbage into the loop.
+- Failover retried with the api key captured at close time, ignoring
+  a key pasted during the backoff; it now prefers the current key.
+- `LoopBuffer` read/peek/patch read the channel count outside the
+  lock — a racing re-init could silently broadcast mono into stereo.
+  Channel count is read under the lock; mismatches emit silence.
+- `WSClient.connect()`/`close()` lifecycle race (a connect could
+  cancel an in-flight close) — serialized with a small lock.
+- Error-handling polish: oauth surfaces malformed-JSON bodies as
+  `OAuthError`; HTTP error bodies decode with `errors="replace"`.
+- Deleted the write-only `_epoch` counter (TCP FIFO + recv-thread
+  routing make slice epochs unnecessary).
+
+Tests: 175 (up from 105) — new suites for the speaker callback, pacer,
+heartbeat worker, binary router, telemetry, generation filter, plus
+wire/ws/audio additions. CLAUDE.md runtime-gotchas updated (the
+keepalive bullet now describes the pacer thread).
+
 ## [0.2.15] — 2026-06-09
 
 ### Big one: LoRA trigger word prepend (fixes "LoRAs feel weaker in TD")
