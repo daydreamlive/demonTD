@@ -283,7 +283,7 @@ def eval_curve_linear(pts: list[tuple[float, float]], t: float) -> float:
 
 # Bump this on every meaningful change so the user can confirm at boot
 # which build is actually loaded. Visible on the "DemonExt initialized" line.
-BUILD_MARKER = "v0.2.15-lora-triggers+tags-b+structure-relabel+catalog-sig-fix+no-dat-paths"
+BUILD_MARKER = "v0.2.15-lora-triggers+tags-b+structure-relabel+catalog-sig-fix+no-dat-paths+lora-resend"
 
 # Hosted-mode pod failover cap. When a hosted WS opens but never reaches
 # `ready` (1011 keepalive / overloaded pod / etc.), we leave the dead
@@ -1124,6 +1124,50 @@ class DemonExt:
             return [{"id": lid, "trigger_word": self._lora_triggers.get(lid, "")}
                     for lid in self._lora_ids]
 
+    def _resend_prompt_for_lora_change(self) -> None:
+        """Re-push the current prompt after a LoRA enable/disable.
+
+        ``enable_lora`` loads the LoRA on the server, but the text
+        encoder keeps running the previous prompt — so the new LoRA's
+        trigger word isn't on the wire and its style doesn't fire
+        until the next prompt send. We trigger that send here so a
+        single click of the LoRA toggle has the audible effect the
+        user expects, instead of requiring them to also touch a
+        strength slider or pulse Sendprompt.
+
+        Logged at a lower level than the user-driven Sendprompt
+        pulse so the textport doesn't double-log on every toggle —
+        the ``enable_lora`` / ``disable_lora`` line already names the
+        triggering event.
+        """
+        if not self._connected:
+            return
+        try:
+            tags = (self._read_par("Prompt", "") or "")
+            key = (self._read_par("Key", "auto") or "auto")
+            time_signature = (self._read_par("Timesignature", "auto") or "auto")
+            tags_b = (self._read_par("Promptb", "") or "")
+
+            catalog_rows = self._lora_catalog_rows_for_triggers()
+            enabled_ids = self._enabled_loras()
+            auto_prepend = bool(self._read_par("Autoprependloratriggers", True))
+            tags = lora_triggers.inject(tags, catalog_rows, enabled_ids,
+                                        auto_prepend=auto_prepend)
+            tags_b_out: str | None
+            if tags_b:
+                tags_b_out = lora_triggers.inject(
+                    tags_b, catalog_rows, enabled_ids,
+                    auto_prepend=auto_prepend)
+            else:
+                tags_b_out = None
+            self._send_text(wire.encode_prompt(
+                tags, key=key, time_signature=time_signature,
+                tags_b=tags_b_out))
+            if self._debug_enabled:
+                self.log(f"  (re-sent prompt for LoRA change)")
+        except Exception as e:
+            self.log(f"_resend_prompt_for_lora_change failed: {e}")
+
     def SetPromptBlend(self, value: float | None = None) -> None:
         v = value if value is not None else float(self._read_par("Promptblend", 0.4))
         self._send_text(wire.encode_set_prompt_blend(v))
@@ -1269,10 +1313,25 @@ class DemonExt:
                                 lora_id, strength=strength))
                             self.log(
                                 f"enable_lora({lora_id!r}, strength={strength})")
+                            # Re-push the prompt so the now-enabled
+                            # LoRA's trigger word reaches the text
+                            # encoder on the next generation. Without
+                            # this, enable_lora loads the LoRA
+                            # server-side but the encoder keeps running
+                            # the stale (pre-toggle) prompt and the
+                            # LoRA's style doesn't fire until the next
+                            # manual SendPrompt or strength touch.
+                            # Mirrors how demon-public-demo re-runs
+                            # sendPrompt whenever enabled LoRAs change.
+                            self._resend_prompt_for_lora_change()
                     else:
                         if self._connected:
                             self._send_text(wire.encode_disable_lora(lora_id))
                             self.log(f"disable_lora({lora_id!r})")
+                            # Same logic on disable: refresh the
+                            # encoder's trigger prefix so the disabled
+                            # LoRA's trigger is no longer in the prompt.
+                            self._resend_prompt_for_lora_change()
                 elif name.startswith("Lorastr"):
                     # Strength change. Only forward if the LoRA is
                     # currently enabled; otherwise the filter would
