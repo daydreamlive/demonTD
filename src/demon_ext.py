@@ -199,6 +199,7 @@ try:
     lora_triggers = _mod('lora_triggers')
     telemetry_mod = _mod('telemetry')
     queue_worker_mod = _mod('queue_worker')
+    params_pacer_mod = _mod('params_pacer')
 except NameError:
     import params as P  # type: ignore
     import wire  # type: ignore
@@ -209,6 +210,7 @@ except NameError:
     import ws_client as ws_client_mod  # type: ignore
     import telemetry as telemetry_mod  # type: ignore
     import queue_worker as queue_worker_mod  # type: ignore
+    import params_pacer as params_pacer_mod  # type: ignore
 
 
 # Scheduled-curve helpers. Module-level so they're testable without TD
@@ -498,6 +500,15 @@ class DemonExt:
         self._hb_extend_ctx: tuple = ("user", None)
         self._last_hb_ensure_t: float = 0.0
 
+        # Params pacer — the dedicated thread that sends the continuous
+        # params stream (the WS keepalive AND the server's pacing
+        # signal). See src/params_pacer.py for why this must not run on
+        # the TD frame loop. The pacer's build_message reads the
+        # enabled-LoRA CACHE below (a thread can't read TD pars).
+        self._pacer = None  # params_pacer_mod.ParamsPacer
+        self._enabled_loras_cache: frozenset = frozenset()
+        self._last_pacer_warn_t: float = 0.0
+
         # Inbound message queue — populated by the WS recv thread, drained
         # on the main TD thread (OnTick / 8 ms timer). TD forbids touching
         # any operator from a non-main thread, so we MUST marshal here.
@@ -613,6 +624,9 @@ class DemonExt:
             self._params_snapshot = {}
             self._last_tick_t = 0.0
             self._send_fail_streak = 0
+            # Sync the pacer thread's LoRA-filter cache to the current
+            # toggle state before any params flow.
+            self._refresh_enabled_loras_cache()
 
             # --- Direct mode --------------------------------------------------
             if mode == "direct":
@@ -860,6 +874,15 @@ class DemonExt:
         if w is not None:
             try:
                 w.stop()
+            except Exception:
+                pass
+
+        # Stop the params pacer — same deal; recreated by _ensure_pacer
+        # on the next _open_ws.
+        p = self._pacer
+        if p is not None:
+            try:
+                p.stop()
             except Exception:
                 pass
 
@@ -1357,6 +1380,9 @@ class DemonExt:
             try:
                 if name.startswith("Loraenable"):
                     on = bool(par.eval())
+                    # Keep the pacer thread's filter view current — it
+                    # can't read TD pars, only this cache.
+                    self._refresh_enabled_loras_cache()
                     if on:
                         # Read the matching strength so the server
                         # loads the LoRA at the user's chosen weight,
@@ -1536,11 +1562,13 @@ class DemonExt:
     def OnTick(self) -> None:
         """Called by tick8ms Timer CHOP every ~50ms (MAIN THREAD).
 
-        Two jobs:
+        Jobs (params sending is NOT one of them anymore — the pacer
+        thread owns that; see src/params_pacer.py):
           1. Drain the WS recv thread's inbound message queue (so server
              messages can safely touch TD operators).
-          2. Flush pending continuous-param changes as a single batched
-             {type:"params"} message.
+          2. Sample scheduled curves into _dirty (TD par reads — main
+             thread only); the pacer picks them up within ~16 ms.
+          3. Debug telemetry.
         """
         # First-tick beacon so we can confirm the timer is firing. Gated:
         # only printed when Debug is on.
@@ -1650,40 +1678,13 @@ class DemonExt:
                         self._cov_log_err_done = True
                         self.log(f"coverage telemetry raised: {e}")
 
-        if not self._connected:
-            return
-
-        # Fold any dirty param changes into the running snapshot.
-        with self._lock:
-            if self._dirty:
-                self._params_snapshot.update(self._dirty)
-                self._dirty.clear()
-
-        # CRITICAL keepalive: only send AFTER `ready` (mirrors the web
-        # client, which starts its param loop on status=="ready"), but
-        # once ready, send a params message EVERY tick — not just on
-        # change. The pod has no separate keepalive: the continuous
-        # params stream (web client: every 8 ms) is the ONLY thing
-        # keeping its WS alive. demonTD used to send only on dirty-change
-        # then go silent, so the pod idle-timed-out and closed before
-        # streaming a single generation slice. Re-sending the current
-        # snapshot every tick with an advancing playback_pos fixes that.
-        if not self._saw_ready:
-            return
-
-        # Strip wire keys the server's params handler rejects + drop
-        # lora_str_<id> for non-enabled LoRAs.
-        raw = self._filter_params_for_wire(dict(self._params_snapshot))
-        if not raw:
-            return
-
-        # Use the loop buffer's actual read position (in seconds) as
-        # playback_pos. Mirrors demon-public-demo's session.player.positionSec.
-        playback_sec = self._ring.position / wire.SAMPLE_RATE
-        try:
-            self._send_text(wire.encode_params(raw, playback_sec))
-        except Exception as e:
-            self.log(f"OnTick send error: {e}")
+        # NOTE: OnTick no longer sends params. The dedicated pacer
+        # THREAD (src/params_pacer.py) owns the continuous params
+        # stream — the keepalive — at a steady ~16 ms cadence that
+        # survives TD main-thread hitches. OnTick's remaining jobs are
+        # the queue drain, curve sampling (TD pars — main thread only),
+        # and the telemetry above. The dirty→snapshot merge moved into
+        # _build_params_message (on the pacer thread, under _lock).
 
     def OnHeartbeat(self) -> None:
         """Timer CHOP compat shim. Heartbeat HTTP now runs on a
@@ -1872,6 +1873,77 @@ class DemonExt:
                 self._auto_extend_backoff_until = time.time() + 24 * 3600
         else:
             self._set_status("Extended")
+
+    # -------- params pacer ----------------------------------------------------
+
+    def _build_params_message(self) -> str | None:
+        """Build one params keepalive message. Runs on the PACER THREAD —
+        must stay TD-free: plain attributes, DemonExt._lock, the
+        LoopBuffer's own lock, and the enabled-LoRA cache only.
+
+        Merges `_dirty` into `_params_snapshot` first (dirty wins, the
+        snapshot stays current — this also fixes the old starvation bug
+        where _drain_inbound consumed `_dirty` before OnTick could fold
+        it into the snapshot, so the snapshot never saw user edits).
+        An EMPTY raw dict still produces a message: that's the
+        keepalive. Gated on `_connected`, NOT `_saw_ready` — the
+        pre-ready params traffic is empirically load-bearing (pods
+        1011-idle-close during the initial VAE encode without it).
+        """
+        if not self._connected or self._wsc is None:
+            return None
+        with self._lock:
+            if self._dirty:
+                self._params_snapshot.update(self._dirty)
+                self._dirty.clear()
+            raw = dict(self._params_snapshot)
+        raw = P.filter_params_for_wire(raw, self._enabled_loras_cache)
+        # The LoopBuffer's actual read position (in seconds) — mirrors
+        # demon-public-demo's session.player.positionSec.
+        playback_sec = self._ring.position / wire.SAMPLE_RATE
+        return wire.encode_params(raw, playback_sec)
+
+    def _pacer_send(self, msg: str) -> bool:
+        """Enqueue-only send for the pacer thread. NEVER route through
+        _send_text — its failure handling calls Disconnect() (TD par
+        writes, main-thread only). Failures count in the pacer's
+        send_fail_streak, polled by the main thread."""
+        w = self._wsc
+        if w is None:
+            return False
+        try:
+            return bool(w.send_text(msg))
+        except Exception:
+            return False
+
+    def _ensure_pacer(self) -> None:
+        """Create/start the params pacer if it isn't running. Idempotent;
+        the main thread calls this at connect and from the per-frame
+        watchdog (belt-and-suspenders — this stream is the keepalive,
+        we never trust a single driver; see MaybeTickFromFrame's
+        history)."""
+        p = self._pacer
+        if p is not None and p.is_alive:
+            return
+        self._pacer = params_pacer_mod.ParamsPacer(
+            build_message=self._build_params_message,
+            send=self._pacer_send,
+            stats=self._stats,
+            log=self.log,
+        )
+        self._pacer.start()
+        if self._debug_enabled:
+            self.log("[pacer] params pacer thread started")
+
+    def _refresh_enabled_loras_cache(self) -> None:
+        """Re-read the Loraenable* pars (main thread!) into the plain
+        frozenset the pacer thread filters against. Call after anything
+        that changes LoRA enable state: catalog apply, Loraenable
+        toggles, Connect."""
+        try:
+            self._enabled_loras_cache = frozenset(self._enabled_loras())
+        except Exception as e:
+            self.log(f"_refresh_enabled_loras_cache raised: {e}")
 
     def MaybeHeartbeatFromFrame(self) -> None:
         """Belt-and-suspenders heartbeat-WORKER keeper, called from
@@ -2063,6 +2135,10 @@ class DemonExt:
             )
             self._wsc.connect()
             self.log(f"_open_ws: WSClient.connect() scheduled (thread starting)")
+            # Start the params pacer — it no-ops (build_message → None)
+            # until _connected flips True on open, then streams the
+            # keepalive every ~16 ms regardless of TD frame hitches.
+            self._ensure_pacer()
         except Exception as e:
             self.log(f"_open_ws: WSClient construct/connect failed: {e}")
             self._set_status(f"WS open failed: {e}")
@@ -2090,8 +2166,8 @@ class DemonExt:
     def _drain_inbound(self) -> None:
         """Main-thread per-frame work. Called by frame_exec every frame:
            1. Drain WS recv-thread events into TD-safe handlers.
-           2. Send a params message every frame to keep DEMON's pipeline
-              generating (server pauses without continuous param flow).
+           2. Supervise the params-pacer thread (which owns the
+              continuous params keepalive — see src/params_pacer.py).
            3. Periodic telemetry log.
         """
         # 0. Main-thread cadence telemetry: a long gap between
@@ -2157,30 +2233,33 @@ class DemonExt:
             except Exception as e:
                 self.log(f"_drain_inbound({kind}) error: {type(e).__name__}: {e}")
 
-        # 2. Send params. Match demon-public-demo at ~125 Hz where possible
-        #    (JS uses TICK_MS=8 setInterval). Our frame_exec runs at frame
-        #    rate (~60 Hz), so effectively we send per frame ≈ every 16 ms.
-        #    Throttle floor to 8 ms to be safe; immediate on dirty changes.
+        # 2. Params-pacer watchdog. The pacer THREAD owns the continuous
+        # params stream now (src/params_pacer.py) — sending from here
+        # (the frame loop) meant any main-thread hitch silenced the
+        # keepalive AND froze playback_pos, the server's pacing signal.
+        # The main thread's remaining job is supervision:
+        #   * thread died → recreate (belt-and-suspenders, house style)
+        #   * sends failing repeatedly → socket is dead; tear down once
+        #     (the pacer itself must never call Disconnect — TD pars).
         if self._connected:
-            with self._lock:
-                raw = dict(self._dirty) if self._dirty else {}
-                self._dirty.clear()
-            now = time.time()
-            last_send = getattr(self, "_last_params_send", 0.0)
-            elapsed = now - last_send
-            if elapsed > 0.008 or raw:
-                # Strip server-rejected keys (prompt_blend, timbre_strength,
-                # lora_blend — each has a dedicated WS message) + drop
-                # lora_str_<id> for non-enabled LoRAs.
-                raw = self._filter_params_for_wire(raw)
-                # playback_sec mirrors demon-public-demo's positionSec:
-                # the loop buffer's current read head, in seconds.
-                playback_sec = self._ring.position / wire.SAMPLE_RATE
-                try:
-                    self._send_text(wire.encode_params(raw, playback_sec))
-                    self._last_params_send = now
-                except Exception as e:
-                    self.log(f"frame param send error: {e}")
+            pacer = self._pacer
+            if pacer is None or not pacer.is_alive:
+                self.log("[pacer] thread not running — restarting")
+                self._ensure_pacer()
+            elif pacer.send_fail_streak >= self._SEND_FAIL_LIMIT:
+                self._teardown_dead_connection(
+                    f"params stream: {pacer.send_fail_streak} consecutive "
+                    f"send failures")
+            elif (self._saw_ready
+                    and pacer.last_send_age() > 1.0):
+                now = time.time()
+                if now - self._last_pacer_warn_t > 5.0:
+                    self._last_pacer_warn_t = now
+                    self.log(
+                        f"[pacer] params stream stalled "
+                        f"({pacer.last_send_age():.1f}s since last send) — "
+                        f"watchdog poking")
+                self._ensure_pacer()
 
         # 3. Telemetry (~every 2 s) — gated behind Debug. Once we know the
         # chain works, these counters are pure noise.
@@ -2713,41 +2792,17 @@ class DemonExt:
                 out[lora_id] = float(par.eval())
         return out
 
-    # Continuous-param wire keys the server's `params` handler does NOT
-    # accept. Each has a dedicated WS message instead:
-    #   prompt_blend     -> set_prompt_blend
-    #   timbre_strength  -> set_timbre_strength
-    #   lora_blend       -> UI-only (fans out into lora_str_<id>; the
-    #                       engine itself doesn't know `lora_blend`).
-    # Sending any of these in a `params` raw dict caused the server to
-    # close the WS — empirically the cause of the "disconnects when
-    # messing with prompts and LoRAs" reports.
-    # Source: demon-public-demo/vendor/demon-ui/hooks/useParamSync.ts
-    # lines 42–53.
-    _PARAMS_NOT_FOR_WIRE = frozenset({
-        "prompt_blend", "timbre_strength", "lora_blend",
-    })
+    # Moved to params.filter_params_for_wire (pure function) so the
+    # params-pacer THREAD can call it with the enabled-LoRA cache
+    # instead of live TD par reads. Alias kept for any external callers.
+    _PARAMS_NOT_FOR_WIRE = P.PARAMS_NOT_FOR_WIRE
 
     def _filter_params_for_wire(
             self, raw: dict[str, Any]) -> dict[str, Any]:
-        """Strip wire keys the server's `params` handler rejects, and
-        drop `lora_str_<id>` entries for non-enabled LoRAs.
-
-        Returns a NEW dict — callers may pass a snapshot of `_dirty`
-        without worrying about mutation. Allocates only one dict + one
-        set; not in the audio hot path so the cost is negligible.
-        """
-        enabled = set(self._enabled_loras())
-        out: dict[str, Any] = {}
-        for k, v in raw.items():
-            if k in self._PARAMS_NOT_FOR_WIRE:
-                continue
-            if k.startswith("lora_str_"):
-                lora_id = k[len("lora_str_"):]
-                if lora_id not in enabled:
-                    continue
-            out[k] = v
-        return out
+        """Main-thread wrapper around params.filter_params_for_wire.
+        Uses the enabled-LoRA cache (refreshed on every enable-state
+        change) so behavior matches the pacer thread exactly."""
+        return P.filter_params_for_wire(raw, self._enabled_loras_cache)
 
     # -------- WS message handlers --------------------------------------------
 
@@ -3097,6 +3152,7 @@ class DemonExt:
             # Same id list as last time — no Table DAT rewrite, no
             # dynamic-par work. Trigger dict was already refreshed
             # above, which is the cheap path we want every echo to take.
+            self._refresh_enabled_loras_cache()
             return
         self._lora_catalog_sig = sig
 
@@ -3210,6 +3266,9 @@ class DemonExt:
                      f"{len(catalog)} LoRAs")
         except Exception as e:
             self.log(f"LoRA page update failed: {type(e).__name__}: {e}")
+        # Now that the dynamic Loraenable* pars exist, sync the pacer
+        # thread's filter cache.
+        self._refresh_enabled_loras_cache()
 
     # -------- Pulse handlers -------------------------------------------------
 
@@ -3355,21 +3414,29 @@ class DemonExt:
             return
         self._send_fail_streak += 1
         if self._send_fail_streak >= self._SEND_FAIL_LIMIT and self._connected:
-            self.log(
-                f"_send: {self._send_fail_streak} consecutive failures — "
-                f"connection is dead; tearing down (stops the retry flood)"
-            )
-            # Flip _connected first so any in-flight per-frame senders
-            # (OnTick / OnParChange) short-circuit immediately, then do a
-            # clean close. Guarded by _connected inside Disconnect so this
-            # only runs once.
-            self._connected = False
-            try:
-                self.Disconnect()
-            except Exception as e:
-                self.log(f"_note_send_result: Disconnect raised: {e}")
-            self._set_status(
-                "Connection lost (send failed) — re-try Connect.")
+            self._teardown_dead_connection(
+                f"{self._send_fail_streak} consecutive send failures")
+
+    def _teardown_dead_connection(self, reason: str) -> None:
+        """Declare the connection dead and tear down ONCE (main thread).
+        Shared by _note_send_result (discrete sends) and the pacer
+        watchdog in _drain_inbound (continuous params stream)."""
+        if not self._connected:
+            return
+        self.log(
+            f"_send: {reason} — connection is dead; tearing down "
+            f"(stops the retry flood)"
+        )
+        # Flip _connected first so any in-flight senders (pacer thread,
+        # OnParChange) short-circuit immediately, then do a clean close.
+        # Guarded by _connected inside Disconnect so this only runs once.
+        self._connected = False
+        try:
+            self.Disconnect()
+        except Exception as e:
+            self.log(f"_teardown_dead_connection: Disconnect raised: {e}")
+        self._set_status(
+            "Connection lost (send failed) — re-try Connect.")
 
     def _send_text(self, payload: str) -> None:
         """Send a text frame via the Python WS client."""

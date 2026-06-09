@@ -64,9 +64,22 @@ harmless (falls back to uncompressed slices); `websocket` missing is fatal.
   (`MaybeTickFromFrame` / `MaybeHeartbeatFromFrame`). Don't assume the
   Timer CHOP works; if you add periodic work, drive it from `frame_exec`.
 - **The pod has no keepalive** — the only thing keeping its WS alive after
-  `ready` is the continuous `params` stream. `OnTick` sends params every
-  tick (not just on change) for exactly this reason. Don't "optimize" it
-  back to send-on-change-only.
+  `ready` is the continuous `params` stream. A dedicated **pacer thread**
+  (`src/params_pacer.py`, ~16 ms cadence) sends it — NOT the frame loop —
+  so TD main-thread hitches can't silence it (a >250 ms hitch used to eat
+  the server's 0.25 s lead and chop the audio). It sends every tick, not
+  just on change; an EMPTY params dict is still the keepalive, and it
+  flows from `_connected` (pre-`ready` traffic is load-bearing — pods
+  1011-idle-close during the initial VAE encode without it). Don't
+  "optimize" it to send-on-change-only, don't gate it on `_saw_ready`,
+  and don't move it back onto OnTick/frame_exec. The main thread
+  supervises it from `_drain_inbound` (restarts it if dead, tears down
+  on a send-fail streak).
+- **Heartbeat + queue HTTP must stay off the main thread.** The
+  `/api/queue/status` poll runs on `src/queue_worker.py`'s thread;
+  `leave()` runs on fire-and-forget threads. Synchronous urlopen on the
+  main thread (fresh TLS handshake, 10 s timeout, every 5 s) was the
+  main "occasionally choppy" cause — it stalled params + slice patching.
 - **The WS socket is single-threaded — keep it that way.** `ws_client.py`
   funnels ALL sends through an outbound queue drained by the recv thread,
   because Python's `ssl.SSLSocket` is **not safe for concurrent read+write

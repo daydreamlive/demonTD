@@ -692,3 +692,44 @@ DISCRETE_PULSE_TO_KIND: dict[str, str] = {
     "Clearstructuresource": "clear_structure_source",
     "Setstructurefixture": "set_structure_fixture",
 }
+
+
+# -----------------------------------------------------------------------------
+# Params-message wire filter
+# -----------------------------------------------------------------------------
+# Continuous-param wire keys the server's `params` handler does NOT
+# accept. Each has a dedicated WS message instead:
+#   prompt_blend     -> set_prompt_blend
+#   timbre_strength  -> set_timbre_strength
+#   lora_blend       -> UI-only (fans out into lora_str_<id>; the
+#                       engine itself doesn't know `lora_blend`).
+# Sending any of these in a `params` raw dict caused the server to
+# close the WS — empirically the cause of the "disconnects when
+# messing with prompts and LoRAs" reports.
+# Source: demon-public-demo/vendor/demon-ui/hooks/useParamSync.ts
+# lines 42–53.
+
+PARAMS_NOT_FOR_WIRE: frozenset[str] = frozenset({
+    "prompt_blend", "timbre_strength", "lora_blend",
+})
+
+
+def filter_params_for_wire(raw: dict[str, Any],
+                           enabled_loras: "frozenset[str] | set[str]",
+                           ) -> dict[str, Any]:
+    """Strip wire keys the server's `params` handler rejects, and drop
+    `lora_str_<id>` entries for non-enabled LoRAs.
+
+    Pure function (no TD, no self) so the params-pacer THREAD can call
+    it — `enabled_loras` must be a pre-computed set, not live par reads.
+    Returns a NEW dict; never mutates `raw`.
+    """
+    out: dict[str, Any] = {}
+    for k, v in raw.items():
+        if k in PARAMS_NOT_FOR_WIRE:
+            continue
+        if k.startswith("lora_str_"):
+            if k[len("lora_str_"):] not in enabled_loras:
+                continue
+        out[k] = v
+    return out
