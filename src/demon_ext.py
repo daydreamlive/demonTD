@@ -47,7 +47,17 @@ from typing import Any
 # Bundled libs live under <repo>/vendor/.
 #   - zstandard: per-platform wheels for compressed audio slice decompression.
 #   - websocket-client: pure-Python, replaces TD's broken WebSocket DAT.
+
+# The vendor/ directory _prepend_vendor_paths discovered, or None. Other
+# vendor-relative lookups (the PortAudio dylib) MUST resolve from this,
+# not from `me.par.file` — the build clears every DAT's file par (so no
+# dev-machine path bakes into shipped .tox files), which made any
+# par.file-derived path garbage in a freshly built .tox.
+_VENDOR_ROOT: str | None = None
+
+
 def _prepend_vendor_paths() -> None:
+    global _VENDOR_ROOT
     try:
         import platform
         sysname = platform.system().lower()
@@ -105,6 +115,7 @@ def _prepend_vendor_paths() -> None:
             print(f"[demon_ext] WARNING: vendor/ not found. Tried: {candidates}")
             return
 
+        _VENDOR_ROOT = vendor_root
         print(f"[demon_ext] vendor at {vendor_root}")
 
         # zstandard (platform-specific)
@@ -163,6 +174,46 @@ def _prepend_vendor_paths() -> None:
         print(f"[demon_ext] _prepend_vendor_paths failed: {e}")
 
 _prepend_vendor_paths()
+
+
+def _portaudio_dylib_path(vendor_root: str | None,
+                          dat_file: str | None = None,
+                          sysname: str | None = None) -> str | None:
+    """Locate the vendored PortAudio binary.
+
+    Resolution order:
+      1. `vendor_root` — the vendor/ directory _prepend_vendor_paths
+         discovered. This is the path that works in a freshly built
+         .tox, where every DAT's file par is cleared by the build.
+      2. `dat_file` — the demon_ext DAT's file-sync path (the dev
+         hot-reload workflow where par.file points at <repo>/src/...);
+         vendor/ is its sibling-of-parent.
+
+    Pure function (testable outside TD). Returns None when the binary
+    isn't found — SpeakerOut then falls back to system PortAudio paths.
+    """
+    if sysname is None:
+        import platform as _platform
+        sysname = _platform.system().lower()
+    if sysname == "darwin":
+        libname = "libportaudio.dylib"
+    elif sysname == "windows":
+        libname = "libportaudio64bit.dll"
+    else:
+        libname = "libportaudio.so"
+    roots: list[str] = []
+    if vendor_root:
+        roots.append(vendor_root)
+    if dat_file:
+        roots.append(os.path.abspath(os.path.join(
+            os.path.dirname(dat_file), os.pardir, "vendor")))
+    for root in roots:
+        p = os.path.join(root, "sounddevice", "_sounddevice_data",
+                         "portaudio-binaries", libname)
+        if os.path.isfile(p):
+            return p
+    return None
+
 
 try:
     import zstandard as zstd
@@ -448,30 +499,26 @@ class DemonExt:
         # Python-side audio playback (bypasses TD's CHOP audio chain via
         # ctypes -> bundled PortAudio binary). Lifecycle is start()'d when
         # initial buffer arrives and stop()'d on Disconnect.
-        # Path to the vendored PortAudio binary is computed from the
-        # demon_ext.py file location + the host platform's filename:
-        #   - macOS:   libportaudio.dylib (universal2 arm64+x86_64)
-        #   - Windows: libportaudio64bit.dll
-        #   - Linux:   libportaudio.so (not vendored yet; falls back to system)
+        # The vendored binary resolves from the vendor/ root discovered
+        # at import time (_VENDOR_ROOT), with the DAT's file-sync path
+        # as the dev-workflow fallback. It must NOT rely on me.par.file
+        # alone: the build clears every DAT's file par, so in a freshly
+        # built .tox that path is garbage — that was the "could not
+        # load PortAudio binary: dlopen(libportaudio.dylib...)" no-audio
+        # failure after a rebuild.
         dylib_path = None
         try:
-            import platform as _platform
-            _sysname = _platform.system().lower()
-            if _sysname == "darwin":
-                _libname = "libportaudio.dylib"
-            elif _sysname == "windows":
-                _libname = "libportaudio64bit.dll"
-            else:
-                _libname = "libportaudio.so"
-            here = os.path.dirname(os.path.abspath(
-                me.par.file.eval()))  # type: ignore[name-defined]  # noqa: F821
-            dylib_path = os.path.abspath(os.path.join(
-                here, os.pardir, "vendor", "sounddevice",
-                "_sounddevice_data", "portaudio-binaries", _libname))
-            if not os.path.isfile(dylib_path):
-                dylib_path = None
+            dat_file = None
+            try:
+                dat_file = me.par.file.eval()  # type: ignore[name-defined]  # noqa: F821
+            except Exception:
+                pass
+            dylib_path = _portaudio_dylib_path(_VENDOR_ROOT,
+                                               dat_file or None)
         except Exception:
             pass
+        self.log(f"PortAudio dylib: "
+                 f"{dylib_path or 'NOT FOUND in vendor/ (will try system paths)'}")
         self._speaker_out = audio_mod.SpeakerOut(
             self._ring,
             sample_rate=wire.SAMPLE_RATE,
