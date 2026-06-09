@@ -77,7 +77,7 @@ if not os.path.isdir(SRC_DIR):
 # on any newly-added field.
 for _modname in ("version", "params", "wire", "queue_client", "oauth",
                  "audio", "ws_client", "telemetry", "queue_worker",
-                 "params_pacer"):
+                 "params_pacer", "binary_router"):
     sys.modules.pop(_modname, None)
 
 import params as P  # noqa: E402  pylint: disable=wrong-import-position
@@ -363,7 +363,7 @@ def _add_one_param(demon, page_lookup, p) -> bool:
 SRC_FILES = ["version.py", "params.py", "wire.py", "queue_client.py",
              "oauth.py", "audio.py", "ws_client.py", "lora_triggers.py",
              "telemetry.py", "queue_worker.py", "params_pacer.py",
-             "demon_ext.py"]
+             "binary_router.py", "demon_ext.py"]
 
 
 def sync_text_dats(demon):

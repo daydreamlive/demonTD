@@ -200,6 +200,7 @@ try:
     telemetry_mod = _mod('telemetry')
     queue_worker_mod = _mod('queue_worker')
     params_pacer_mod = _mod('params_pacer')
+    binary_router_mod = _mod('binary_router')
 except NameError:
     import params as P  # type: ignore
     import wire  # type: ignore
@@ -211,6 +212,7 @@ except NameError:
     import telemetry as telemetry_mod  # type: ignore
     import queue_worker as queue_worker_mod  # type: ignore
     import params_pacer as params_pacer_mod  # type: ignore
+    import binary_router as binary_router_mod  # type: ignore
 
 
 # Scheduled-curve helpers. Module-level so they're testable without TD
@@ -514,10 +516,11 @@ class DemonExt:
         # any operator from a non-main thread, so we MUST marshal here.
         self._inbound: "queue.Queue[tuple[str, Any]]" = queue.Queue()
 
-        # Protocol state: after server sends `ready`, the FIRST binary
-        # message is the raw float16 initial buffer (NO 23-byte header).
-        # Subsequent binaries are slices. We flip this on `ready`.
-        self._expecting_initial_buffer: bool = False
+        # Binary-frame router — decodes + patches slices ON the WS recv
+        # thread (see src/binary_router.py). One per connection, created
+        # in _open_ws; binary routing state (expecting-initial, stem
+        # skip counts) lives inside it, fed by recv-thread text sniffing.
+        self._router = None  # binary_router_mod.BinaryRouter | None
 
         # Cached state of the `Debug` toggle on the Session page. When True,
         # verbose diagnostics are logged + WAV dumps go to /tmp/demon-debug/.
@@ -858,6 +861,12 @@ class DemonExt:
             self._ws_url = None
             self._expires_at_ms = None
             self._dirty.clear()
+            # Detach the router BEFORE clearing the ring — a recv
+            # thread still draining frames must not patch (or re-init)
+            # the ring after we wipe it.
+            r = self._router
+            if r is not None:
+                r.detach()
             self._ring.clear()
 
         # Stop Python-side audio playback. Idempotent.
@@ -1666,7 +1675,8 @@ class DemonExt:
                     pos = self._ring.position
                     in_patched = self._ring.is_patched_at(pos)
                     pos_s = pos / wire.SAMPLE_RATE
-                    n_slices = getattr(self, "_n_binary_frames", 0)
+                    r = self._router
+                    n_slices = r.n_slices if r is not None else 0
                     self.log(
                         f"[coverage] {pct:.1f}% patched "
                         f"(slices_recv={n_slices}) "
@@ -2122,6 +2132,30 @@ class DemonExt:
                 pass
             self._wsc = None
 
+        # Detach the old router FIRST: WSClient.close() joins its recv
+        # thread for only 2 s, and a thread stuck in a long send (30 s
+        # timeout) lingers past that — detached, it can no longer patch
+        # the NEW session's ring or post stale loop-initialized events.
+        old_router = self._router
+        if old_router is not None:
+            old_router.detach()
+        self._router = binary_router_mod.BinaryRouter(
+            ring=self._ring,
+            post_event=lambda kind, payload: self._inbound.put(
+                (kind, payload)),
+            stats=self._stats,
+            # Per-router decompressor: ZstdDecompressor is not
+            # concurrency-safe and recv threads can briefly overlap
+            # across reconnects. _ZSTD_DEC stays as the capability
+            # probe only (drives compression: none in SessionConfig).
+            zstd_dec=(zstd.ZstdDecompressor()
+                      if _ZSTD_DEC is not None else None),
+            log=self.log,
+            is_debug=lambda: self._debug_enabled,
+            debug_dump=lambda name, pcm, ch: self._dump_wav(
+                os.path.join(DEBUG_DUMP_DIR, name), pcm, ch),
+        )
+
         self._set_status(f"Opening {ws_url}...")
         try:
             self._wsc = ws_client_mod.WSClient(
@@ -2155,10 +2189,25 @@ class DemonExt:
         self._inbound.put(("open", None))
 
     def _on_ws_text(self, msg: str) -> None:
+        # Sniff FIRST (recv thread): ready/swap_ready/stem_assets set
+        # the router's binary-routing state before the next binary frame
+        # arrives on this same thread. The full text processing still
+        # happens on the main thread via the queue.
+        r = self._router
+        if r is not None:
+            r.sniff_text(msg)
         self._inbound.put(("text", msg))
 
     def _on_ws_binary(self, payload: bytes) -> None:
-        self._inbound.put(("binary", payload))
+        # Decode + patch INLINE on the recv thread (TD-free; the
+        # LoopBuffer has its own lock) — binary frames are NOT queued to
+        # the main thread anymore, so slice patching survives TD
+        # main-thread hitches. See src/binary_router.py.
+        r = self._router
+        if r is not None:
+            r.handle_binary(payload)
+        else:
+            self._inbound.put(("binary", payload))
 
     def _on_ws_close(self, code, reason) -> None:
         self._inbound.put(("close", (code, reason)))
@@ -2197,6 +2246,8 @@ class DemonExt:
                     self._on_text(payload)
                 elif kind == "binary":
                     self._on_binary(payload)
+                elif kind == "loop-initialized":
+                    self._on_loop_initialized(payload)
                 elif kind == "close":
                     code, reason = payload
                     self.log(f"[ws_client] closed code={code} reason={reason!r}")
@@ -2270,7 +2321,8 @@ class DemonExt:
                 self._last_telem_log = now
                 buffered = self._ring.available
                 buf_s = buffered / wire.SAMPLE_RATE
-                n_bin = getattr(self, "_n_binary_frames", 0)
+                r = self._router
+                n_bin = r.n_binary_frames if r is not None else 0
                 n_cook = getattr(self, "_n_cook_recv", 0)
                 self.log(
                     f"telemetry: buffered={buffered} ({buf_s:.2f}s)  "
@@ -2333,8 +2385,9 @@ class DemonExt:
         if cfg is None or audio is None:
             return
         # Reset session-state counters at the start of every successful flush.
+        # (Binary-frame/slice counters live in the per-connection
+        # BinaryRouter now — fresh instance every _open_ws.)
         self._playback_pos = 0
-        self._n_binary_frames = 0
         self._n_cook_recv = 0
         # `_auto_enable_done` was the gate for the v0.1.x bach
         # auto-enable. v0.2.4 removed that — user LoRA toggles are now
@@ -2816,11 +2869,11 @@ class DemonExt:
         kind = data.get("type", "")
         if kind == "ready":
             self.log(f"server ready: ch={data.get('channels')} sr={data.get('sample_rate')}")
-            # The very next binary frame is the initial buffer (raw float16
-            # PCM with NO header — NOT slice format). Flag it so _on_binary
-            # decodes accordingly.
-            self._expecting_initial_buffer = True
-            self._ready_channels = int(data.get("channels", 2)) or 2
+            # NOTE: the expecting-initial-buffer flag lives in the
+            # BinaryRouter now, set by recv-thread text sniffing
+            # (_on_ws_text → router.sniff_text) — by the time we drain
+            # this event, the recv thread may already have processed the
+            # initial buffer. Nothing binary-routing-related here.
             cat = data.get("lora_catalog") or []
             self._apply_lora_catalog(cat)
             self._seed_dirty_from_current_pars()
@@ -2849,11 +2902,11 @@ class DemonExt:
         elif kind == "prompt_applied":
             self.log(f"prompt applied: {data.get('tags')}")
         elif kind == "swap_ready":
-            self._epoch += 1
-            self._ring.clear()
-            # Next binary is again the raw float16 initial buffer for the new track.
-            self._expecting_initial_buffer = True
-            self._ready_channels = int(data.get("channels", 2)) or 2
+            # Logging only. The ring clear + expecting-initial flag now
+            # happen in the BinaryRouter's recv-thread sniffer — a clear
+            # HERE could land AFTER the recv thread already init'd the
+            # NEW track's loop and wipe it (main-thread drain lags the
+            # recv thread by design).
             self.log(f"swap_ready ch={data.get('channels')}")
         elif kind in ("timbre_set", "timbre_cleared", "structure_set",
                       "structure_cleared"):
@@ -2862,13 +2915,13 @@ class DemonExt:
             self.log(f"server {kind}: {data.get('error') or data.get('message')}")
             self._set_status(f"Error: {kind}")
         elif kind in ("stem_assets", "stem_ready"):
-            # Server's new stem-separation feature. Two big binary blobs
-            # follow (one per stem channel pair, ~13 MB each, marked
-            # with new flag bits we don't decode). Quiet ack — we don't
-            # offer stem playback in v0.1.
-            self._expecting_stem_blobs = int(data.get("count", 2) or 2)
+            # Server's stem-separation feature. Two big binary blobs
+            # follow (~13 MB each, flag bits we don't decode). The skip
+            # counter lives in the BinaryRouter (recv-thread sniffer);
+            # this is informational only.
             if self._debug_enabled:
-                self.log(f"stem_assets (skipping {self._expecting_stem_blobs} blobs)")
+                self.log(f"stem_assets (router skipping "
+                         f"{int(data.get('count', 2) or 2)} blobs)")
         elif kind == "stem_failed":
             # Server-side stem extraction failed for an uploaded track.
             # Since we don't have a stems UI, this is informational only —
@@ -2943,165 +2996,56 @@ class DemonExt:
             self.log(f"_dump_wav failed for {path}: {e}")
 
     def _on_binary(self, buf: bytes) -> None:
-        # Counter for telemetry
-        self._n_binary_frames = getattr(self, "_n_binary_frames", 0) + 1
-
-        # The first binary frame after `ready` (or `swap_ready`) is the
-        # raw float16 initial buffer — interleaved PCM, no 23-byte slice
-        # header. This becomes the full loop content. Subsequent frames
-        # are slices that patch specific positions in the loop.
-        if self._expecting_initial_buffer:
-            self._expecting_initial_buffer = False
-            ch = getattr(self, "_ready_channels", 2) or 2
-            try:
-                u16 = np.frombuffer(bytes(buf), dtype=np.uint16)
-                pcm = u16.view(np.float16).astype(np.float32)
-                n = pcm.size // ch
-                if n <= 0:
-                    self.log(f"initial buffer: empty")
-                    return
-                # Optional debug: log byte stats + dump WAV. Gated.
-                if self._debug_enabled:
-                    try:
-                        head_hex = bytes(buf[:32]).hex(" ")
-                        peak = float(np.max(np.abs(pcm))) if pcm.size > 0 else 0.0
-                        mabs = float(np.mean(np.abs(pcm))) if pcm.size > 0 else 0.0
-                        self.log(f"[DIAG initial_buffer] bytes={len(buf)} "
-                                 f"head32={head_hex}")
-                        self.log(f"[DIAG initial_buffer] decoded peak={peak:.4f} "
-                                 f"mean_abs={mabs:.4f} first10={pcm[:10].tolist()}")
-                    except Exception as e:
-                        self.log(f"[DIAG initial_buffer] log failed: {e}")
-                    self._dump_wav(
-                        os.path.join(DEBUG_DUMP_DIR, "initial_buffer.wav"),
-                        pcm[: n * ch], ch,
-                    )
-                # Initialize the loop with this buffer (channels, frames).
-                self._ring.init(pcm[: n * ch], channels=ch)
-                self._debug_slice_count = 0
-                self.log(
-                    f"initial buffer: {n} frames ({n / wire.SAMPLE_RATE:.2f}s) "
-                    f"ch={ch} — loop initialized"
-                )
-                # Start Python-side audio playback if the user has it
-                # enabled (default True). Bypasses TD's CHOP audio chain.
-                #
-                # CRITICAL: if speaker_out.start() returns False (PortAudio
-                # rejected the device), we keep the WS alive. The user can
-                # still get audio out via the COMP's out_chop port wired to
-                # an external Audio Device Out CHOP, or fix their device
-                # config and retry. Tearing down the hosted session
-                # (Disconnect) would force a re-queue which is expensive
-                # and doesn't fix the audio problem.
-                try:
-                    if bool(self._read_par("Speakerout", True)):
-                        # Honor the user's output-device pick before opening.
-                        self._apply_audio_device_selection()
-                        ok = self._speaker_out.start()
-                        if not ok:
-                            self._set_status(
-                                "Audio output failed — try: save & fully "
-                                "restart TD; or toggle 'Python Audio Out' "
-                                "off and wire the COMP's out to your own "
-                                "Audio Device Out CHOP. Details in textport."
-                            )
-                except Exception as e:
-                    self.log(f"speaker_out start raised: {e}")
-                    self._set_status(
-                        f"Audio output crashed: {type(e).__name__} — "
-                        f"see textport. Session still active."
-                    )
-            except Exception as e:
-                self.log(f"initial buffer decode failed: {e}")
-            return
-
-        # Streaming slice (23-byte header + raw/zstd float16). Each slice
-        # PATCHES the loop at slice.start_sample. Flag bit 1 = delta (mix),
-        # otherwise overwrite. Mirrors useStartSession.ts.
-        #
-        # Skip-ahead for two server-side features we don't yet handle:
-        #   - stem blobs: large binary frames with flag bits we don't
-        #     recognize (e.g. 0x07). The server announces these with a
-        #     `stem_assets` JSON message ahead of time; we consume them
-        #     silently here so they don't spam the textport.
-        #   - any future slice-shape changes: log ONCE per unknown flag
-        #     value, not per slice.
-        flag_byte = buf[0] if len(buf) > 0 else 0
-        expecting_stems = getattr(self, "_expecting_stem_blobs", 0)
-        if expecting_stems > 0:
-            self._expecting_stem_blobs = expecting_stems - 1
-            return
-        if flag_byte & ~0x01:
-            # Any flag bit outside the documented {RAW=0, DELTA=1} set —
-            # treat as a server feature we don't decode (stems, etc.).
-            seen = getattr(self, "_unknown_slice_flags_seen", set())
-            if flag_byte not in seen:
-                self.log(
-                    f"slice flags=0x{flag_byte:02x} unknown ({len(buf)}B) "
-                    f"— ignoring (future server feature, e.g. stems)"
-                )
-                seen.add(flag_byte)
-                self._unknown_slice_flags_seen = seen
-            return
-        try:
-            slice_ = wire.decode_slice(buf, zstd_dec=_ZSTD_DEC)
-        except Exception as e:
-            # One log per error message — don't spam.
-            seen = getattr(self, "_slice_err_seen", set())
-            key = type(e).__name__ + ":" + str(e)[:80]
-            if key not in seen:
-                self.log(f"slice rejected ({len(buf)}B, flags=0x{flag_byte:02x}): {e}")
-                seen.add(key)
-                self._slice_err_seen = seen
-            return
-
-        ch = max(1, slice_.channels)
-        n = slice_.pcm.size // ch
-        if n <= 0:
-            return
-
-        # Optional debug: log first 3 slices + dump WAVs. Gated.
-        if self._debug_enabled:
-            idx = getattr(self, "_debug_slice_count", 0)
-            if idx < 3:
-                try:
-                    peak = float(np.max(np.abs(slice_.pcm))) if slice_.pcm.size > 0 else 0.0
-                    mabs = float(np.mean(np.abs(slice_.pcm))) if slice_.pcm.size > 0 else 0.0
-                    self.log(
-                        f"[DIAG slice_{idx}] flags={slice_.flags} "
-                        f"start_sample={slice_.start_sample} num_samples={slice_.num_samples} "
-                        f"channels={slice_.channels} peak={peak:.4f} mean_abs={mabs:.4f}"
-                    )
-                except Exception:
-                    pass
-                self._dump_wav(
-                    os.path.join(DEBUG_DUMP_DIR, f"slice_{idx}.wav"),
-                    slice_.pcm[: n * ch], ch,
-                )
-                self._debug_slice_count = idx + 1
-
-        if slice_.flags == wire.SLICE_FLAG_DELTA:
-            self._ring.add_delta(slice_.start_sample, slice_.pcm[: n * ch])
+        """Thin delegate to the BinaryRouter. The real path is
+        _on_ws_binary → router.handle_binary directly on the recv
+        thread; this remains only so the dormant WebSocket-DAT OnReceive
+        path can't desync routing state if it's ever revived."""
+        r = self._router
+        if r is not None:
+            r.handle_binary(buf)
         else:
-            self._ring.patch(slice_.start_sample, slice_.pcm[: n * ch])
+            self.log(f"_on_binary: no router (dropped {len(buf)}B frame)")
 
-        # Slice-coverage telemetry: flag every loop chunk this slice
-        # touched as patched-at-least-once. The OnTick Debug telemetry
-        # block surfaces the running coverage % and whether the
-        # playhead is currently inside an un-patched chunk — diagnostic
-        # for "random source flashes during playback" reports.
-        self._ring.mark_patched(slice_.start_sample, n)
-
-        # Patch-lead telemetry: a slice landing at/behind the playhead
-        # means the listener hears STALE loop content where this audio
-        # should have been — the "music glitches" flavor of chop.
+    def _on_loop_initialized(self, info: dict) -> None:
+        """Main-thread tail of initial-buffer handling: the router (recv
+        thread) already decoded + ring.init'd; what's left is the bits
+        that touch TD — the log line and starting SpeakerOut (reads the
+        Speakerout/Audiodevice pars)."""
+        n = int(info.get("frames", 0) or 0)
+        ch = int(info.get("channels", 2) or 2)
+        self.log(
+            f"initial buffer: {n} frames ({n / wire.SAMPLE_RATE:.2f}s) "
+            f"ch={ch} — loop initialized"
+        )
+        # Start Python-side audio playback if the user has it
+        # enabled (default True). Bypasses TD's CHOP audio chain.
+        #
+        # CRITICAL: if speaker_out.start() returns False (PortAudio
+        # rejected the device), we keep the WS alive. The user can
+        # still get audio out via the COMP's out_chop port wired to
+        # an external Audio Device Out CHOP, or fix their device
+        # config and retry. Tearing down the hosted session
+        # (Disconnect) would force a re-queue which is expensive
+        # and doesn't fix the audio problem. start() is idempotent,
+        # so the re-fire after a swap_ready re-init is harmless.
         try:
-            lead_s, late = telemetry_mod.compute_patch_lead(
-                slice_.start_sample, self._ring.position,
-                self._ring.frames, wire.SAMPLE_RATE)
-            self._stats.note_patch(lead_s, late)
-        except Exception:
-            pass
+            if bool(self._read_par("Speakerout", True)):
+                # Honor the user's output-device pick before opening.
+                self._apply_audio_device_selection()
+                ok = self._speaker_out.start()
+                if not ok:
+                    self._set_status(
+                        "Audio output failed — try: save & fully "
+                        "restart TD; or toggle 'Python Audio Out' "
+                        "off and wire the COMP's out to your own "
+                        "Audio Device Out CHOP. Details in textport."
+                    )
+        except Exception as e:
+            self.log(f"speaker_out start raised: {e}")
+            self._set_status(
+                f"Audio output crashed: {type(e).__name__} — "
+                f"see textport. Session still active."
+            )
 
     # -------- LoRA catalog ---------------------------------------------------
 
