@@ -91,6 +91,17 @@ TS_INTERFACE_BLOCK_RE = re.compile(
 )
 TS_FIELD_NAME_RE = re.compile(r'^\s*(\w+)\??:', re.MULTILINE)
 
+# `wire_key: "ui label"` entries from `SliderTile.tsx`'s LABEL_OVERRIDES
+# table (and any sibling map with the same shape). The canonical's
+# user-facing label for `hint_strength` is "structure" and for
+# `timbre_strength` is "timbre"; without this check the TD operator can
+# silently keep raw wire names as labels (which is exactly how
+# "Structure" went missing from the Synthesis page — `hint_strength`
+# was labeled "Hint Strength" instead of "structure").
+TS_LABEL_OVERRIDE_RE = re.compile(
+    r'^\s*([a-z_][a-z0-9_]*)\s*:\s*"([^"]+)"\s*,?\s*$', re.MULTILINE
+)
+
 
 def _strip_line_comments(src: str) -> str:
     """Strip `//` line comments from a TS/JS source string.
@@ -105,6 +116,37 @@ def _strip_line_comments(src: str) -> str:
             continue
         out.append(line)
     return "\n".join(out)
+
+
+def parse_ts_label_overrides(slider_tile_tsx: str) -> dict[str, str]:
+    """Extract the `{wire_key: ui_label}` map from `SliderTile.tsx`.
+
+    Looks for the LABEL_OVERRIDES (or similar) object literal, which
+    maps continuous-stream wire keys to their user-facing labels. The
+    canonical labels `hint_strength → "structure"` and
+    `timbre_strength → "timbre"` are the most consequential — they
+    define how a user actually FINDS these controls in the UI.
+
+    Returns ``{}`` if the file isn't available or the table can't be
+    located — drift check then skips silently rather than false-positives.
+    """
+    if not slider_tile_tsx:
+        return {}
+    # Find the wire-key → user-label map. Canonical name (as of
+    # origin/main) is `DISPLAY_NAMES`, but the table has gone by other
+    # names historically — accept the common shapes. The block goes
+    # from `<NAME>: Record<string, string> = {` (or `= {` for plain JS)
+    # to the next `}`.
+    block_re = re.compile(
+        r'(?:DISPLAY_NAMES|LABEL_OVERRIDES|LABEL_MAP|LABEL_TABLE)'
+        r'[^=]*=\s*\{([^}]+)\}',
+        re.DOTALL,
+    )
+    out: dict[str, str] = {}
+    for m in block_re.finditer(slider_tile_tsx):
+        for key, label in TS_LABEL_OVERRIDE_RE.findall(m.group(1)):
+            out[key] = label
+    return out
 
 
 def parse_ts_protocol(types_protocol_ts: str,
@@ -241,6 +283,69 @@ _TS_CLIENT_TYPES_INTENTIONALLY_OMITTED = {
 }
 
 
+# params.py per-Param record. Pulls Param("Name", "wire_or_None", "Page",
+# "Type", "category", ..., label="...", ..., ui_hidden=True/False, ...).
+# We don't need every field — just name, wire_name, category, label, and
+# whether ui_hidden is explicitly True.
+PY_PARAM_LINE_RE = re.compile(
+    r'Param\(\s*"(?P<name>[A-Za-z][A-Za-z0-9]*)"\s*,'
+    r'\s*(?:"(?P<wire>[a-z_][a-z0-9_]*)"|None)'
+    r'\s*,\s*"(?P<page>[^"]+)"'
+    r'\s*,\s*"(?P<type>[A-Za-z]+)"'
+    r'\s*,\s*"(?P<category>init|continuous|session|discrete)"'
+    r'(?P<rest>.*?)\)',
+    re.DOTALL,
+)
+
+
+def parse_py_params(params_py: str) -> list[dict]:
+    """Parse `Param(...)` constructor calls from src/params.py.
+
+    Returns a list of dicts with name, wire, category, label, ui_hidden.
+    Used by the UI-coverage and label-parity drift checks.
+
+    Regex-based: we don't want to import the actual `params` module
+    because it pulls TD-only globals on import paths.
+    """
+    out: list[dict] = []
+    for m in PY_PARAM_LINE_RE.finditer(params_py):
+        rest = m.group("rest")
+        label_m = re.search(r'\blabel\s*=\s*"([^"]*)"', rest)
+        label = label_m.group(1) if label_m else m.group("name")
+        ui_hidden = bool(re.search(r'\bui_hidden\s*=\s*True', rest))
+        out.append({
+            "name": m.group("name"),
+            "wire": m.group("wire"),  # None if not bound to a wire key
+            "page": m.group("page"),
+            "type": m.group("type"),
+            "category": m.group("category"),
+            "label": label,
+            "ui_hidden": ui_hidden,
+        })
+    return out
+
+
+def parse_py_discrete_pulse_map(params_py: str) -> dict[str, str]:
+    """Parse `DISCRETE_PULSE_TO_KIND` dict from params.py.
+
+    That dict declares which pulse-par names dispatch which wire message
+    kind. The UI-coverage check needs both halves: the pulse name (to
+    find a non-hidden Param) and the wire kind (to confirm the encoder
+    on the other side actually exists).
+    """
+    m = re.search(
+        r'DISCRETE_PULSE_TO_KIND\s*:\s*dict\[[^\]]+\]\s*=\s*\{([^}]+)\}',
+        params_py, re.DOTALL,
+    )
+    if not m:
+        return {}
+    out: dict[str, str] = {}
+    for k, v in re.findall(r'"([A-Za-z][A-Za-z0-9]*)"\s*:\s*"([a-z_][a-z0-9_]*)"',
+                           m.group(1)):
+        out[k] = v
+    return out
+
+
 def _slice_function_body(src: str, func_name: str) -> str:
     """Return the body of `def func_name(self, ...)` in `src` as a substring.
 
@@ -251,6 +356,72 @@ def _slice_function_body(src: str, func_name: str) -> str:
     m = re.search(rf'(\s*def\s+{func_name}\s*\(.*?\):.*?)(?=\n    def\s|\nclass\s|\Z)',
                   src, re.DOTALL)
     return m.group(1) if m else ""
+
+
+def parse_py_lora_trigger_wiring(demon_ext_py: str,
+                                 lora_triggers_py: str) -> dict:
+    """Confirm the LoRA-trigger prepend pipeline is fully wired.
+
+    Returns a dict with three booleans:
+      * ``module_exists``       — ``src/lora_triggers.py`` is present and
+        references ``primary_trigger_word``.
+      * ``catalog_captures``    — ``_apply_lora_catalog`` in
+        ``src/demon_ext.py`` pulls ``primary_trigger_word`` from each
+        catalog entry's metadata.
+      * ``send_path_injects``   — ``SendPrompt`` (or its helpers) actually
+        calls ``lora_triggers.inject`` or ``build_trigger_prefix``.
+
+    Without all three, enabling a LoRA does nothing at the text encoder
+    level — the activation token never reaches the model, so the LoRA's
+    style barely fires. This is the exact gap that motivated Fix 1 of
+    the parity work.
+    """
+    module_exists = bool(lora_triggers_py and
+                         "primary_trigger_word" in lora_triggers_py)
+    catalog_body = _slice_function_body(demon_ext_py, "_apply_lora_catalog")
+    catalog_captures = (
+        "primary_trigger_word" in catalog_body
+        and "trigger_word" in catalog_body  # the table-DAT column
+    )
+    send_body = _slice_function_body(demon_ext_py, "SendPrompt")
+    send_path_injects = (
+        "lora_triggers.inject" in send_body
+        or "build_trigger_prefix" in send_body
+    )
+    return {
+        "module_exists": module_exists,
+        "catalog_captures": catalog_captures,
+        "send_path_injects": send_path_injects,
+    }
+
+
+def parse_py_tags_b_plumbing(demon_ext_py: str) -> dict:
+    """Confirm `tags_b` is plumbed all the way to the wire.
+
+    SessionConfig sends ``prompt_b`` — the canonical pattern is that the
+    runtime ``SendPrompt`` companion ALSO sends ``tags_b`` to keep the
+    second prompt in lockstep mid-session. Returns:
+      * ``session_sends_prompt_b`` — `_build_session_config` includes a
+        ``"prompt_b": ...`` entry.
+      * ``send_passes_tags_b``     — `SendPrompt` (or its helpers) calls
+        ``encode_prompt`` with ``tags_b=`` argument.
+
+    If session sends prompt_b but the send path doesn't pass tags_b,
+    you've got the exact half-wired prompt-blend bug Fix 2 closed.
+    """
+    cfg_body = _slice_function_body(demon_ext_py, "_build_session_config")
+    session_sends_prompt_b = '"prompt_b"' in cfg_body
+    send_body = _slice_function_body(demon_ext_py, "SendPrompt")
+    # Look for `tags_b=` only inside encode_prompt(...) call sites — log
+    # f-strings and the function signature would otherwise false-pass.
+    encode_calls = re.findall(
+        r'wire\.encode_prompt\s*\(([^)]*)\)', send_body, re.DOTALL,
+    )
+    send_passes_tags_b = any("tags_b=" in c for c in encode_calls)
+    return {
+        "session_sends_prompt_b": session_sends_prompt_b,
+        "send_passes_tags_b": send_passes_tags_b,
+    }
 
 
 def parse_py_protocol(demon_ext_py: str, wire_py: str) -> dict:
@@ -327,12 +498,22 @@ class DriftItem:
     items: list
 
 
-def compute_drift(ts: dict, py: dict) -> list[DriftItem]:
+def compute_drift(ts: dict, py: dict,
+                  ts_label_overrides: dict[str, str] | None = None,
+                  py_params: list[dict] | None = None,
+                  py_pulse_map: dict[str, str] | None = None,
+                  py_lora_wiring: dict | None = None,
+                  py_tags_b_wiring: dict | None = None) -> list[DriftItem]:
     """Compare TS surface against PY surface. Returns a list of drift items.
 
     'Drift' here means: TS has something we don't. We don't flag the
     reverse (us-only items) because that's not a server protocol concern
     -- it just means we left a TD-specific feature in.
+
+    The extra args drive the UI-coverage, label-parity, and trigger-
+    /tags_b-wiring checks added after the structure-label and LoRA-
+    trigger-prepend bugs slipped through the original protocol-only
+    surface.
     """
     drift: list[DriftItem] = []
 
@@ -399,6 +580,114 @@ def compute_drift(ts: dict, py: dict) -> list[DriftItem]:
             "SessionConfig fields in TS that we don't send",
             new_fields,
         ))
+
+    # ---- UI-coverage check ------------------------------------------------
+    # Every pulse declared in DISCRETE_PULSE_TO_KIND must have a
+    # corresponding non-hidden Param in params.py. Catches the "protocol
+    # exists in wire.py but the user can't trigger it" class of bug —
+    # which is half the reason the user couldn't find structure (the
+    # other half being a label mismatch, caught below).
+    if py_params is not None and py_pulse_map is not None:
+        params_by_name = {p["name"]: p for p in py_params}
+        ui_misses: list[str] = []
+        for pulse_name, wire_kind in sorted(py_pulse_map.items()):
+            p = params_by_name.get(pulse_name)
+            if p is None:
+                ui_misses.append(
+                    f"{pulse_name} → {wire_kind}: no Param in params.py — "
+                    f"the wire is plumbed but nothing in the UI fires it"
+                )
+            elif p["ui_hidden"]:
+                ui_misses.append(
+                    f"{pulse_name} → {wire_kind}: Param is ui_hidden=True — "
+                    f"users will never see the control"
+                )
+        if ui_misses:
+            drift.append(DriftItem(
+                "ui_coverage",
+                "Wire-mapped pulses with no visible Param in params.py",
+                ui_misses,
+            ))
+
+    # ---- User-facing label parity ----------------------------------------
+    # For every TD Param with a wire_name that the canonical labels
+    # explicitly, the TD label should match (modulo capitalization). This
+    # is the check that would have caught Hint-Strength-vs-Structure:
+    # the canonical labels `hint_strength` as "structure", but TD was
+    # labeling it "Hint Strength" — same wire key, different user word.
+    if ts_label_overrides and py_params is not None:
+        label_misses: list[str] = []
+        for p in py_params:
+            wire = p["wire"]
+            if not wire or wire not in ts_label_overrides:
+                continue
+            want = ts_label_overrides[wire].strip().lower()
+            got = (p["label"] or "").strip().lower()
+            if got == want:
+                continue
+            # `got` may legitimately be a richer label ("Structure" vs
+            # canonical "structure", or "Timbre Strength" vs "timbre") —
+            # only flag when the canonical's word doesn't appear at all
+            # in the TD label. This is the lenient version of the check;
+            # the stricter version would require exact-match plus a
+            # `# label-diverges-from-canonical:` comment to opt out.
+            if want not in got:
+                label_misses.append(
+                    f"{p['name']} (wire: {wire}): canonical labels this "
+                    f"\"{ts_label_overrides[wire]}\", TD labels it "
+                    f"\"{p['label']}\" — users will look for the canonical "
+                    f"word and not find it"
+                )
+        if label_misses:
+            drift.append(DriftItem(
+                "label_parity",
+                "User-facing labels diverge from canonical for shared wire keys",
+                label_misses,
+            ))
+
+    # ---- LoRA trigger injection wired ------------------------------------
+    # If any of the three integration points is missing, enabling a LoRA
+    # in the UI does nothing at the text encoder — the activation token
+    # never goes on the wire. This is the bug Fix 1 closed; the check
+    # keeps it closed.
+    if py_lora_wiring is not None:
+        lora_gaps: list[str] = []
+        if not py_lora_wiring["module_exists"]:
+            lora_gaps.append(
+                "src/lora_triggers.py missing or lacks primary_trigger_word "
+                "— port demon-public-demo/vendor/demon-ui/lib/loraTriggers.ts"
+            )
+        if not py_lora_wiring["catalog_captures"]:
+            lora_gaps.append(
+                "_apply_lora_catalog doesn't capture primary_trigger_word into "
+                "the lora_catalog Table DAT — the trigger column is dead"
+            )
+        if not py_lora_wiring["send_path_injects"]:
+            lora_gaps.append(
+                "SendPrompt doesn't call lora_triggers.inject / "
+                "build_trigger_prefix — enabled LoRAs never fire at the encoder"
+            )
+        if lora_gaps:
+            drift.append(DriftItem(
+                "lora_trigger_injection",
+                "LoRA trigger-word prepend pipeline is incomplete",
+                lora_gaps,
+            ))
+
+    # ---- tags_b plumbing consistency -------------------------------------
+    # SessionConfig sends prompt_b but SendPrompt never refreshed it
+    # mid-session = the Promptblend slider blends nothing once the user
+    # types a new B prompt. Fix 2 closed this; the check keeps it closed.
+    if py_tags_b_wiring is not None:
+        if (py_tags_b_wiring["session_sends_prompt_b"]
+                and not py_tags_b_wiring["send_passes_tags_b"]):
+            drift.append(DriftItem(
+                "tags_b_plumbing",
+                "SessionConfig sends prompt_b but SendPrompt never passes "
+                "tags_b — runtime edits to Prompt B don't reach the wire",
+                ["SendPrompt should call encode_prompt(..., tags_b=...) "
+                 "when Promptb is non-empty"],
+            ))
 
     return drift
 
@@ -480,28 +769,47 @@ def main() -> int:
     td_files = {
         "demon_ext_py": td_root / "src/demon_ext.py",
         "wire_py":      td_root / "src/wire.py",
+        "params_py":    td_root / "src/params.py",
     }
     for label, p in td_files.items():
         if not p.is_file():
             print(f"error: missing source file ({label}): {p}", file=sys.stderr)
             return 2
+    # lora_triggers.py is OPTIONAL at parse time (the drift check then
+    # flags it as missing) — don't hard-error if it's gone.
+    lora_triggers_path = td_root / "src/lora_triggers.py"
+    lora_triggers_src = (lora_triggers_path.read_text()
+                         if lora_triggers_path.is_file() else "")
 
     dpd_rel = {
         "types_protocol_ts":  "vendor/demon-ui/types/protocol.ts",
         "engine_protocol_ts": "vendor/demon-ui/engine/protocol.ts",
         "audio_worklet_js":   "public/audio-worklet.js",
+        # Optional — used for the label-parity check. If the canonical
+        # moves the LABEL_OVERRIDES table somewhere else, this becomes a
+        # silent no-op (parse_ts_label_overrides handles ""), not a
+        # hard failure.
+        "slider_tile_tsx":    "vendor/demon-ui/components/Performance/SliderTile.tsx",
     }
+
+    # Optional reference files: missing → empty string, so the
+    # downstream parser silently no-ops instead of failing the whole run.
+    _OPTIONAL_DPD_FILES = {"slider_tile_tsx"}
 
     if args.worktree:
         # Legacy: read the reference straight from the working tree.
         dpd_sha = _git_short_sha(dpd_root)
-        try:
-            dpd_src = {k: (dpd_root / rel).read_text()
-                       for k, rel in dpd_rel.items()}
-        except OSError as e:
-            print(f"error: reading demon-public-demo working tree: {e}",
-                  file=sys.stderr)
-            return 2
+        dpd_src: dict[str, str] = {}
+        for k, rel in dpd_rel.items():
+            try:
+                dpd_src[k] = (dpd_root / rel).read_text()
+            except OSError as e:
+                if k in _OPTIONAL_DPD_FILES:
+                    dpd_src[k] = ""
+                    continue
+                print(f"error: reading demon-public-demo working tree: {e}",
+                      file=sys.stderr)
+                return 2
         # Loud warning if the working tree is behind the remote.
         if not args.no_fetch:
             _git_fetch(dpd_root)
@@ -523,13 +831,17 @@ def main() -> int:
             print(f"error: ref '{args.ref}' not found in {dpd_root}. Use "
                   f"--ref <branch> or --worktree.", file=sys.stderr)
             return 2
-        try:
-            dpd_src = {k: _read_ref_file(dpd_root, args.ref, rel)
-                       for k, rel in dpd_rel.items()}
-        except subprocess.CalledProcessError as e:
-            print(f"error: reading {args.ref} from demon-public-demo: "
-                  f"{e.stderr or e}", file=sys.stderr)
-            return 2
+        dpd_src = {}
+        for k, rel in dpd_rel.items():
+            try:
+                dpd_src[k] = _read_ref_file(dpd_root, args.ref, rel)
+            except subprocess.CalledProcessError as e:
+                if k in _OPTIONAL_DPD_FILES:
+                    dpd_src[k] = ""
+                    continue
+                print(f"error: reading {args.ref} from demon-public-demo: "
+                      f"{e.stderr or e}", file=sys.stderr)
+                return 2
         # Informational: note when the checkout differs from the compared ref.
         head_sha = _git_short_sha(dpd_root)
         if head_sha != dpd_sha:
@@ -542,11 +854,26 @@ def main() -> int:
         dpd_src["engine_protocol_ts"],
         dpd_src["audio_worklet_js"],
     )
-    py = parse_py_protocol(
-        td_files["demon_ext_py"].read_text(),
-        td_files["wire_py"].read_text(),
+    ts_label_overrides = parse_ts_label_overrides(
+        dpd_src.get("slider_tile_tsx", "")
     )
-    drift = compute_drift(ts, py)
+    demon_ext_src = td_files["demon_ext_py"].read_text()
+    wire_src = td_files["wire_py"].read_text()
+    params_src = td_files["params_py"].read_text()
+    py = parse_py_protocol(demon_ext_src, wire_src)
+    py_params = parse_py_params(params_src)
+    py_pulse_map = parse_py_discrete_pulse_map(params_src)
+    py_lora_wiring = parse_py_lora_trigger_wiring(demon_ext_src,
+                                                  lora_triggers_src)
+    py_tags_b_wiring = parse_py_tags_b_plumbing(demon_ext_src)
+    drift = compute_drift(
+        ts, py,
+        ts_label_overrides=ts_label_overrides,
+        py_params=py_params,
+        py_pulse_map=py_pulse_map,
+        py_lora_wiring=py_lora_wiring,
+        py_tags_b_wiring=py_tags_b_wiring,
+    )
 
     report = {
         "demon_public_demo_sha": dpd_sha,

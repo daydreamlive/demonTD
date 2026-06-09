@@ -360,20 +360,34 @@ def _add_one_param(demon, page_lookup, p) -> bool:
 # DAT sync
 # -----------------------------------------------------------------------------
 SRC_FILES = ["version.py", "params.py", "wire.py", "queue_client.py",
-             "oauth.py", "audio.py", "ws_client.py", "demon_ext.py"]
+             "oauth.py", "audio.py", "ws_client.py", "lora_triggers.py",
+             "demon_ext.py"]
 
 
 def sync_text_dats(demon):
     """Ensure each src/*.py has a corresponding Text DAT.
 
-    Two things happen per file:
-      1. We READ THE FILE DIRECTLY and set dat.text — this guarantees
-         the content is in the DAT immediately, so `op('demon_ext').module`
-         resolves on the same frame the extension is wired.
-      2. We set par.file + syncfile so the DAT round-trips to disk for
-         hot-reload during development. (When the .tox is exported, the
-         text travels inline; users dropping the .tox into a fresh project
-         don't need src/ on disk.)
+    Each DAT gets:
+      1. ``dat.text = <file content>`` — the canonical content,
+         embedded directly. Travels inside the .tox at export time;
+         users dropping the .tox into a fresh project don't need src/
+         on disk for the operator to work.
+      2. ``dat.par.file = ""`` + ``loadonstart = False`` +
+         ``syncfile = False`` — **no external file reference baked
+         in**. Earlier builds set par.file to the developer's absolute
+         src/ path. Even with loadonstart=False, importing the .tox
+         elsewhere triggered TD's "DAT did not load from <path> —
+         overwrite anyway?" dialog because TD evaluated the path on
+         first instantiation and the path didn't exist on the
+         importing machine. Clearing par.file removes the trigger
+         entirely.
+
+    Dev hot-reload workflow (per session, since par.file is no longer
+    baked in): in TD, open the DAT, click the file-path picker, point
+    it at the local ``src/<file>.py``, set loadonstart back to True
+    on THAT instance. The DAT will then reload on every project open.
+    Don't commit that change to the .tox — it would re-introduce the
+    import dialog for everyone else.
     """
     for fname in SRC_FILES:
         dat_name = fname.replace(".py", "")
@@ -396,15 +410,16 @@ def sync_text_dats(demon):
             print(f"!! could not read {abs_path}: {e}")
             continue
         try:
-            dat.par.file = abs_path
-            # Important: keep one-way (file -> DAT) load only.
-            # Bidirectional sync re-writes the .py file from the DAT every
-            # cook, which can round-trip BOMs or other in-memory artifacts
-            # back to disk. Build-time scripts edit src/ on disk; we want
-            # TD to read those changes, not overwrite them.
+            # Clear par.file so no developer-machine path is baked
+            # into the exported .tox. The embedded `dat.text` above
+            # is the canonical content; this DAT has no external file
+            # reference, so TD has nothing to fail loading on import.
+            dat.par.file = ""
+            # Belt-and-braces: even with file empty, force both flags
+            # off so any stale state from a previously-built DAT
+            # (loadonstart=True, syncfile=True) is wiped.
+            dat.par.loadonstart = False
             dat.par.syncfile = False
-            dat.par.loadonstart = True
-            dat.par.writepulse.pulse() if hasattr(dat.par, "writepulse") else None
         except Exception as e:
             print(f"!! sync flags on {fname}: {e}")
 

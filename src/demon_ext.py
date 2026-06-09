@@ -196,12 +196,14 @@ try:
     oauth = _mod('oauth')
     audio_mod = _mod('audio')
     ws_client_mod = _mod('ws_client')
+    lora_triggers = _mod('lora_triggers')
 except NameError:
     import params as P  # type: ignore
     import wire  # type: ignore
     import queue_client as queue_mod  # type: ignore
     import oauth  # type: ignore
     import audio as audio_mod  # type: ignore
+    import lora_triggers  # type: ignore
     import ws_client as ws_client_mod  # type: ignore
 
 
@@ -281,7 +283,7 @@ def eval_curve_linear(pts: list[tuple[float, float]], t: float) -> float:
 
 # Bump this on every meaningful change so the user can confirm at boot
 # which build is actually loaded. Visible on the "DemonExt initialized" line.
-BUILD_MARKER = "v0.2.14-seed-int"
+BUILD_MARKER = "v0.2.15-lora-triggers+tags-b+structure-relabel+catalog-sig-fix+no-dat-paths"
 
 # Hosted-mode pod failover cap. When a hosted WS opens but never reaches
 # `ready` (1011 keepalive / overloaded pod / etc.), we leave the dead
@@ -417,6 +419,11 @@ class DemonExt:
 
         # LoRA catalog (mirrors the Table DAT)
         self._lora_ids: list[str] = []
+        # id -> primary_trigger_word from the server's lora_catalog
+        # metadata. Used by SendPrompt to inject the trigger words into
+        # `tags` / `tags_b` at send time (see src/lora_triggers.py and
+        # demon-public-demo/vendor/demon-ui/lib/loraTriggers.ts).
+        self._lora_triggers: dict[str, str] = {}
 
         # Audio buffer — DEMON's audio model is a LOOP, not a stream.
         # Server sends an initial buffer (typically 24s) that becomes the
@@ -1067,13 +1074,55 @@ class DemonExt:
     # -------- discrete messages ---------------------------------------------
 
     def SendPrompt(self, tags: str | None = None, key: str | None = None,
-                   time_signature: str | None = None) -> None:
+                   time_signature: str | None = None,
+                   tags_b: str | None = None) -> None:
         tags = tags if tags is not None else (self._read_par("Prompt", "") or "")
         key = key if key is not None else (self._read_par("Key", "auto") or "auto")
         time_signature = (time_signature if time_signature is not None
                           else (self._read_par("Timesignature", "auto") or "auto"))
-        self._send_text(wire.encode_prompt(tags, key=key, time_signature=time_signature))
-        self.log(f"prompt: {tags!r} key={key} ts={time_signature}")
+        # Tags B for prompt blending. `Promptblend` slider lerps between
+        # tags (A, value=0) and tags_b (B, value=1) at the server. We
+        # only include `tags_b` on the wire when non-empty — matches
+        # demon-public-demo's protocol.ts sendPrompt.
+        tags_b = tags_b if tags_b is not None else (self._read_par("Promptb", "") or "")
+
+        # Inject LoRA trigger words. Each enabled LoRA's primary trigger
+        # is prepended to both tags and tags_b so the model's text
+        # encoder actually fires the LoRA style. Gated by the
+        # Autoprependloratriggers toggle (default On). See
+        # src/lora_triggers.py + demon-public-demo's loraTriggers.ts.
+        catalog_rows = self._lora_catalog_rows_for_triggers()
+        enabled_ids = self._enabled_loras()
+        auto_prepend = bool(self._read_par("Autoprependloratriggers", True))
+        tags = lora_triggers.inject(tags, catalog_rows, enabled_ids,
+                                    auto_prepend=auto_prepend)
+        tags_b_out: str | None
+        if tags_b:
+            tags_b_out = lora_triggers.inject(tags_b, catalog_rows, enabled_ids,
+                                              auto_prepend=auto_prepend)
+        else:
+            tags_b_out = None
+
+        self._send_text(wire.encode_prompt(tags, key=key,
+                                           time_signature=time_signature,
+                                           tags_b=tags_b_out))
+        if tags_b_out is not None:
+            self.log(f"prompt: tags={tags!r} tags_b={tags_b_out!r} "
+                     f"key={key} ts={time_signature}")
+        else:
+            self.log(f"prompt: {tags!r} key={key} ts={time_signature}")
+
+    def _lora_catalog_rows_for_triggers(self) -> list[dict]:
+        """Build the catalog-rows list expected by lora_triggers helpers.
+
+        Pulls from the in-memory `_lora_triggers` dict (kept in lockstep
+        with the server's lora_catalog by `_apply_lora_catalog`). The
+        result is fresh on every call — toggling a LoRA enable
+        immediately changes what the next SendPrompt sees.
+        """
+        with self._lock:
+            return [{"id": lid, "trigger_word": self._lora_triggers.get(lid, "")}
+                    for lid in self._lora_ids]
 
     def SetPromptBlend(self, value: float | None = None) -> None:
         v = value if value is not None else float(self._read_par("Promptblend", 0.4))
@@ -2356,11 +2405,14 @@ class DemonExt:
             "enabled_loras": self._enabled_loras(),
             "prompt":       str(init_val("Initprompt",
                 "heavy dubstep, deathstep, afxdump, growl heavy bass distortion")),
-            # Secondary prompt for A/B blending. The current Promptblend
-            # continuous param interpolates between `prompt` (A) and
-            # `prompt_b` (B). Empty string = no B side, equivalent to
-            # always-A. Matches demon-public-demo's `prompt_b: perf.promptB`.
-            "prompt_b":     str(init_val("Initpromptb", "")),
+            # Secondary prompt for A/B blending. The Promptblend continuous
+            # param interpolates between `prompt` (A) and `prompt_b` (B).
+            # Empty string = no B side, equivalent to always-A. We source
+            # `prompt_b` from the LIVE `Promptb` par on the Prompt+LoRA
+            # page so it tracks whatever the user has typed at session
+            # start — one source of truth, editable mid-session via
+            # SendPrompt (matches demon-public-demo's `prompt_b: perf.promptB`).
+            "prompt_b":     str(init_val("Promptb", "") or ""),
             "lora_strengths": self._lora_strengths(),
             "fixture_name": str(init_val("Fixturename", "")),
             # Playback-lead tuning (server-side decode buffer). Optional in
@@ -2780,8 +2832,45 @@ class DemonExt:
         changed — otherwise we churn the UI 100x/second and starve the
         receive thread.
         """
+        def _trig(e: dict) -> str:
+            return str((e.get("metadata") or {}).get("primary_trigger_word") or "")
+
+        # IMPORTANT: signature is keyed on the catalog's SHAPE (ids
+        # only), NOT on trigger_word. The server may echo the catalog
+        # with metadata on first sight and WITHOUT metadata on
+        # subsequent state-change echoes — folding metadata into the
+        # sig made every echo look different, forcing the Table DAT
+        # rewrite + dynamic-par fan-out + UI redraw on every server
+        # event. That manifested as severe per-parameter UI lag.
+        # Keep the sig id-only so the expensive work runs once per
+        # catalog-shape change.
         sig = tuple(sorted(e.get("id", "") for e in catalog))
+
+        # Trigger words always update — but idempotently. An echo that
+        # CARRIES a trigger word overwrites; a metadata-less echo
+        # preserves whatever we already learned. This way we pick up
+        # late-arriving trigger metadata without thrashing the UI.
+        ids = [e.get("id", "") for e in catalog if e.get("id")]
+        new_triggers = dict(getattr(self, "_lora_triggers", {}))
+        for e in catalog:
+            lid = e.get("id", "")
+            if not lid:
+                continue
+            t = _trig(e)
+            if t:
+                new_triggers[lid] = t
+            elif lid not in new_triggers:
+                new_triggers[lid] = ""
+        # Drop entries for LoRAs that left the catalog entirely.
+        new_triggers = {k: v for k, v in new_triggers.items() if k in ids}
+        with self._lock:
+            self._lora_ids = ids
+            self._lora_triggers = new_triggers
+
         if sig == getattr(self, "_lora_catalog_sig", None):
+            # Same id list as last time — no Table DAT rewrite, no
+            # dynamic-par work. Trigger dict was already refreshed
+            # above, which is the cheap path we want every echo to take.
             return
         self._lora_catalog_sig = sig
 
@@ -2789,19 +2878,16 @@ class DemonExt:
         if table is not None:
             try:
                 table.clear()
-                table.appendRow(["id", "name", "default_strength"])
+                table.appendRow(["id", "name", "default_strength", "trigger_word"])
                 for entry in catalog:
                     table.appendRow([
                         entry.get("id", ""),
                         entry.get("name") or entry.get("id", ""),
                         entry.get("strength", 1.0),
+                        new_triggers.get(entry.get("id", ""), ""),
                     ])
             except Exception as e:
                 self.log(f"lora_catalog write failed: {e}")
-
-        ids = [e.get("id", "") for e in catalog if e.get("id")]
-        with self._lock:
-            self._lora_ids = ids
 
         # Dynamically add Toggle + Float par per LoRA on the Prompt+LoRA page.
         # Par names must be TD-legal: start uppercase, only lowercase/digits

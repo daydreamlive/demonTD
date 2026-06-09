@@ -202,11 +202,10 @@ INIT_PARAMS: list[Param] = [
           order=100, multiline=True, label="Initial Prompt",
           help="Text prompt at session start (changeable later via Send Prompt). "
                "Default matches demon-public-demo."),
-    Param("Initpromptb", "prompt_b", "Init", "Str", "init", default="",
-          order=105, multiline=True, label="Initial Prompt B",
-          help="Secondary prompt for A/B blending. The Prompt+LoRA page's "
-               "Prompt Blend slider interpolates between Initial Prompt (A) "
-               "and Initial Prompt B (B). Empty = no B, always A."),
+    # NOTE: There is no `Initpromptb` companion to `Initprompt`. The
+    # canonical has one source of truth for the secondary prompt — the
+    # live `Promptb` on the Prompt+LoRA page. `_build_session_config`
+    # reads it from there for the `prompt_b` field in SessionConfig.
     Param("Fixturename", "fixture_name", "Init", "Str", "init", default="",
           order=110, label="Fixture Name",
           help="Known fixture name for sidecar lookup (BPM/key/latents). Optional."),
@@ -263,8 +262,16 @@ PROMPT_LORA_PARAMS: list[Param] = [
           label="Send Prompt",
           help="Send the current Prompt / Key / Time Signature to the server."),
     Param("Prompt", None, "Prompt+LoRA", "Str", "session", default="",
-          order=20, multiline=True,
-          help="Tags or freeform text to apply on Send Prompt."),
+          order=20, multiline=True, label="Prompt (Tags A)",
+          help="Tags or freeform text to apply on Send Prompt. With "
+               "Prompt B set, Prompt Blend lerps between this (A, 0) "
+               "and Prompt B (1)."),
+    Param("Promptb", None, "Prompt+LoRA", "Str", "session", default="",
+          order=22, multiline=True, label="Prompt B (Tags B)",
+          help="Optional secondary prompt for blending. When set, "
+               "Prompt Blend lerps between Prompt (A, 0) and this (B, 1). "
+               "Empty = no B side, equivalent to always-A. "
+               "Editable mid-session: changes apply on next Send Prompt."),
     Param("Key", None, "Prompt+LoRA", "Menu", "session", default="auto", order=30,
           menu_names=_KEYSCALE_NAMES, menu_labels=_KEYSCALE_LABELS,
           help="Musical key. 'Auto' lets the server detect."),
@@ -310,6 +317,17 @@ PROMPT_LORA_PARAMS: list[Param] = [
           help="Interpolation method for the feedback blend."),
     Param("Loraheader", None, "Prompt+LoRA", "Header", "session",
           order=70, section_header=True, label="LoRAs"),
+    # When On (default), each enabled LoRA's `primary_trigger_word` from
+    # the server's catalog is prepended to `tags` AND `tags_b` on every
+    # SendPrompt. Without it the model's text encoder never sees the
+    # activation token and the LoRA's style barely fires. Off = manual
+    # workflow, user includes triggers in Prompt/PromptB themselves.
+    # Mirrors demon-public-demo's `engine.auto_prepend_lora_triggers`.
+    Param("Autoprependloratriggers", None, "Prompt+LoRA", "Toggle", "session",
+          default=True, order=75, label="Auto-Prepend LoRA Triggers",
+          help="Inject each enabled LoRA's trigger word into the prompt "
+               "at send-time. Required for LoRAs to actually fire. "
+               "Turn off only if you're managing trigger words manually."),
     Param("Lorablend", "lora_blend", "Prompt+LoRA", "Float", "continuous",
           default=0.5, min=0.0, max=1.0, clamp_min=True, clamp_max=True,
           order=80, label="LoRA Blend",
@@ -324,9 +342,17 @@ PROMPT_LORA_PARAMS: list[Param] = [
 # Page 4: Synthesis (the hot continuous params)
 # -----------------------------------------------------------------------------
 SYNTHESIS_PARAMS: list[Param] = [
+    # Wire key is `denoise`, but the canonical labels this "Strength"
+    # — users perceive this knob as "how strong is the remix", not as
+    # a diffusion-process knob. See DISPLAY_NAMES in
+    # demon-public-demo/vendor/demon-ui/components/Performance/SliderTile.tsx.
     Param("Denoise", "denoise", "Synthesis", "Float", "continuous", default=0.85,
           min=0.0, max=1.0, clamp_min=True, clamp_max=True, order=10,
-          help="Denoising strength."),
+          label="Strength",
+          help="How strong the remix is — at 0 the model echoes the source "
+               "faithfully, at 1 it's free to depart fully. The canonical "
+               "name is `denoise` (diffusion-process internal), but the user "
+               "perceives this as 'strength of the transformation'."),
     # Generation seed. The reference web client uses an arbitrary uint32
     # (config.json default 42, with a "dice" button to randomize) — NOT a
     # normalized 0..1 value, which is what this used to (wrongly) be. We
@@ -346,10 +372,19 @@ SYNTHESIS_PARAMS: list[Param] = [
     Param("Shift", "shift", "Synthesis", "Float", "continuous", default=0.5,
           min=0.0, max=1.0, clamp_min=True, clamp_max=True, order=40,
           help="Temporal phase alignment (pro)."),
+    # Wire key is `hint_strength`, but the canonical's user-facing label
+    # for this control is "Structure" (see demon-public-demo/vendor/demon-ui/
+    # components/Performance/SliderTile.tsx and LiteControls.tsx). The
+    # control governs how closely the model follows the source's section /
+    # rhythm / dynamics — i.e. its structure. Keep the Param `name` as
+    # `Hintstrength` so the wire mapping is unchanged.
     Param("Hintstrength", "hint_strength", "Synthesis", "Float", "continuous",
           default=1.4, min=0.0, max=2.0, clamp_min=True, clamp_max=True,
-          order=50, label="Hint Strength",
-          help="Reference latent hint strength."),
+          order=50, label="Structure",
+          help="How closely the model follows the original song's structure "
+               "— sections, rhythm, dynamics. Crank it up to keep the "
+               "arrangement intact; drop it to let the model rearrange "
+               "more freely. (wire: hint_strength)"),
     Param("Timbrestrength", "timbre_strength", "Synthesis", "Float", "continuous",
           default=1.0, min=0.0, max=1.0, clamp_min=True, clamp_max=True,
           order=60, label="Timbre Strength",
@@ -409,12 +444,15 @@ RCFG_DCW_PARAMS: list[Param] = [
           menu_names=("low", "high", "double", "pix"),
           menu_labels=("Low", "High", "Double", "Pix"),
           help="Correction bands (pro)."),
+    # Canonical labels these "DCW low" / "DCW high" — band-pair naming
+    # rather than the engine-internal "scaler" / "high_scaler". See
+    # DISPLAY_NAMES in demon-public-demo's SliderTile.tsx.
     Param("Dcwscaler", "dcw_scaler", "RCFG+DCW", "Float", "continuous",
           default=0.05, min=0.0, max=0.5, clamp_min=True, clamp_max=True,
-          order=50, label="DCW Scaler"),
+          order=50, label="DCW low"),
     Param("Dcwhighscaler", "dcw_high_scaler", "RCFG+DCW", "Float", "continuous",
           default=0.02, min=0.0, max=0.5, clamp_min=True, clamp_max=True,
-          order=60, label="DCW High Scaler"),
+          order=60, label="DCW high"),
     Param("Dcwwavelet", "dcw_wavelet", "RCFG+DCW", "Menu", "continuous",
           default="haar", order=70, label="DCW Wavelet",
           menu_names=("haar", "db4", "sym8", "db8"),
@@ -487,10 +525,10 @@ CURVE_PARAMS: list[Param] = [
                'slider when enabled.'),
 
     Param("Hintstrengthcurveheader", None, "Curves", "Header", "session",
-          order=20, section_header=True, label="Hint Strength"),
+          order=20, section_header=True, label="Structure"),
     Param("Hintstrengthcurveenable", None, "Curves", "Toggle", "session",
           default=False, order=21, label="Enable",
-          help="Enable curve scheduling for Hint Strength."),
+          help="Enable curve scheduling for Structure (wire: hint_strength)."),
     Param("Hintstrengthcurve", None, "Curves", "Str", "session",
           default='{"points": [[0, 0.5], [1, 0.5]]}',
           order=22, multiline=True, label="Curve JSON",

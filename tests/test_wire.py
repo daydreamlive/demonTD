@@ -69,6 +69,26 @@ def test_encode_prompt_full():
                    "key": "A minor", "time_signature": "4"}
 
 
+def test_encode_prompt_omits_tags_b_when_none():
+    # tags_b=None → no tags_b key in the message. Distinguishes "no B
+    # side, server should treat as always-A" from "empty string B".
+    msg = json.loads(wire.encode_prompt("ambient", key="auto",
+                                        time_signature="auto", tags_b=None))
+    assert "tags_b" not in msg
+
+
+def test_encode_prompt_with_lora_prefix_in_both_tags():
+    # End-to-end: pre-injected prefix on both tags and tags_b is what
+    # actually goes on the wire. This is the shape SendPrompt produces
+    # when LoRAs are enabled and Promptb is set.
+    msg = json.loads(wire.encode_prompt(
+        "acidcore, ambient", key="auto", time_signature="auto",
+        tags_b="acidcore, techno",
+    ))
+    assert msg["tags"] == "acidcore, ambient"
+    assert msg["tags_b"] == "acidcore, techno"
+
+
 def test_encode_set_interp_method():
     for path in ("prompt", "timbre", "structure", "feedback"):
         msg = json.loads(wire.encode_set_interp_method(path, "slerp"))
