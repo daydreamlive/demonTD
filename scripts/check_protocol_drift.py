@@ -265,6 +265,12 @@ _TS_SESSION_FIELDS_INTENTIONALLY_OMITTED = {
     # in v0.2; omit unconditionally to match the JS default-fixture
     # path.
     "stem_source_mode",
+    # Optional opt-in field announcing which telemetry schema the
+    # client emits. demonTD doesn't emit telemetry events — omitting
+    # the field is functionally equivalent to "no telemetry" and
+    # matches every shipped release through v0.2.14. Pick up if/when
+    # we wire client-side telemetry.
+    "telemetry_version",
 }
 
 # Client-side `type` literals demonTD knowingly doesn't encode. These are
@@ -280,6 +286,17 @@ _TS_CLIENT_TYPES_INTENTIONALLY_OMITTED = {
     # exposed as a TD parameter. Add an encoder + Loopbandstart/end
     # pars to revisit.
     "loop_band",
+}
+
+# Server-emitted `type` literals demonTD doesn't dispatch on. These are
+# server messages we deliberately ignore — their absence from
+# `_on_text`'s kind-handler set isn't a parity gap.
+_TS_SERVER_TYPES_INTENTIONALLY_IGNORED = {
+    # Server ack of the SessionConfig handshake. Carries no payload TD
+    # acts on — the operator already proceeds on the existing `ready`
+    # message that follows. Shipped every release through v0.2.14
+    # without a handler with no ill effect.
+    "init_ack",
 }
 
 
@@ -517,8 +534,11 @@ def compute_drift(ts: dict, py: dict,
     """
     drift: list[DriftItem] = []
 
-    # Server messages: TS has, we don't dispatch.
-    new_server = sorted(ts["server_types"] - py["server_kinds"])
+    # Server messages: TS has, we don't dispatch. Filter the
+    # deliberately-ignored set (see _TS_SERVER_TYPES_INTENTIONALLY_IGNORED).
+    new_server = sorted(ts["server_types"]
+                        - py["server_kinds"]
+                        - _TS_SERVER_TYPES_INTENTIONALLY_IGNORED)
     if new_server:
         drift.append(DriftItem(
             "server_message_types",
