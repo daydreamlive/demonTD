@@ -197,6 +197,7 @@ try:
     audio_mod = _mod('audio')
     ws_client_mod = _mod('ws_client')
     lora_triggers = _mod('lora_triggers')
+    telemetry_mod = _mod('telemetry')
 except NameError:
     import params as P  # type: ignore
     import wire  # type: ignore
@@ -205,6 +206,7 @@ except NameError:
     import audio as audio_mod  # type: ignore
     import lora_triggers  # type: ignore
     import ws_client as ws_client_mod  # type: ignore
+    import telemetry as telemetry_mod  # type: ignore
 
 
 # Scheduled-curve helpers. Module-level so they're testable without TD
@@ -472,6 +474,14 @@ class DemonExt:
 
         # WS client (Python thread; replaces TD's broken WebSocket DAT)
         self._wsc = None  # ws_client_mod.WSClient | None
+
+        # Smoothness telemetry — cross-thread counters (params keepalive
+        # cadence, slice patch lead, main-thread hitches, heartbeat HTTP
+        # duration). Drained + logged as a [health] line from
+        # _drain_inbound. See src/telemetry.py.
+        self._stats = telemetry_mod.SmoothnessStats()
+        self._last_drain_t: float = 0.0
+        self._last_health_log: float = 0.0
 
         # Inbound message queue — populated by the WS recv thread, drained
         # on the main TD thread (OnTick / 8 ms timer). TD forbids touching
@@ -1542,6 +1552,9 @@ class DemonExt:
                     stats = None
                 if stats:
                     new_underruns = stats.get("underruns_since_drain", 0)
+                    # Accumulate for the [health] line (drained there).
+                    self._health_underruns_accum = getattr(
+                        self, "_health_underruns_accum", 0) + new_underruns
                     if new_underruns > 0 and (
                             now - getattr(self, "_last_underrun_warn", 0.0)
                             > 5.0):
@@ -1998,6 +2011,16 @@ class DemonExt:
               generating (server pauses without continuous param flow).
            3. Periodic telemetry log.
         """
+        # 0. Main-thread cadence telemetry: a long gap between
+        # _drain_inbound calls IS a TD main-thread hitch (heavy cook,
+        # UI interaction, blocking I/O). These are the events that used
+        # to stall the params keepalive and slice patching.
+        now_mono = time.monotonic()
+        if self._last_drain_t > 0.0:
+            self._stats.note_drain_gap((now_mono - self._last_drain_t)
+                                       * 1000.0)
+        self._last_drain_t = now_mono
+
         # 1. Drain inbound queue
         max_per_tick = 64
         for _ in range(max_per_tick):
@@ -2079,6 +2102,34 @@ class DemonExt:
                     f"telemetry: buffered={buffered} ({buf_s:.2f}s)  "
                     f"binary_frames_recv={n_bin}  audio_out_cooks={n_cook}"
                 )
+
+        # 4. Smoothness [health] line (~every 5 s while connected).
+        # Debug mode gets the full line every period; otherwise we only
+        # speak up when something actually degraded (late patches,
+        # underruns, or a main-thread hitch >250 ms — the server's lead
+        # floor is 0.25 s, so a hitch that size is exactly when slices
+        # start landing behind the playhead).
+        if self._connected:
+            now = time.time()
+            if now - self._last_health_log > 5.0:
+                self._last_health_log = now
+                try:
+                    snap = self._stats.drain()
+                    underruns = getattr(self, "_health_underruns_accum", 0)
+                    self._health_underruns_accum = 0
+                    degraded = (
+                        snap["patches_late"] > 0
+                        or underruns > 0
+                        or snap["drain_gap_max_ms"] > 250.0
+                    )
+                    if self._debug_enabled or degraded:
+                        line = telemetry_mod.SmoothnessStats.format_line(
+                            snap, underruns_since=underruns)
+                        self.log(f"[health] {line}")
+                except Exception as e:
+                    if not getattr(self, "_health_log_err_done", False):
+                        self._health_log_err_done = True
+                        self.log(f"[health] telemetry raised: {e}")
 
     @staticmethod
     def _parse_ws_url(url: str) -> tuple[str | None, int]:
@@ -2890,6 +2941,17 @@ class DemonExt:
         # playhead is currently inside an un-patched chunk — diagnostic
         # for "random source flashes during playback" reports.
         self._ring.mark_patched(slice_.start_sample, n)
+
+        # Patch-lead telemetry: a slice landing at/behind the playhead
+        # means the listener hears STALE loop content where this audio
+        # should have been — the "music glitches" flavor of chop.
+        try:
+            lead_s, late = telemetry_mod.compute_patch_lead(
+                slice_.start_sample, self._ring.position,
+                self._ring.frames, wire.SAMPLE_RATE)
+            self._stats.note_patch(lead_s, late)
+        except Exception:
+            pass
 
     # -------- LoRA catalog ---------------------------------------------------
 
