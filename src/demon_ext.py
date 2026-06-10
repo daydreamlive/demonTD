@@ -252,6 +252,7 @@ try:
     queue_worker_mod = _mod('queue_worker')
     params_pacer_mod = _mod('params_pacer')
     binary_router_mod = _mod('binary_router')
+    param_glide_mod = _mod('param_glide')
 except NameError:
     import params as P  # type: ignore
     import wire  # type: ignore
@@ -264,6 +265,7 @@ except NameError:
     import queue_worker as queue_worker_mod  # type: ignore
     import params_pacer as params_pacer_mod  # type: ignore
     import binary_router as binary_router_mod  # type: ignore
+    import param_glide as param_glide_mod  # type: ignore
 
 
 # Scheduled-curve helpers. Module-level so they're testable without TD
@@ -560,6 +562,24 @@ class DemonExt:
         self._enabled_loras_cache: frozenset = frozenset()
         self._last_pacer_warn_t: float = 0.0
 
+        # Send shaping (src/param_glide.py — VST parity, always-on):
+        # lora_str_* trailing-edge debounce + blend glide. The post-2026-06
+        # backend re-fits LoRA weights per >0.02 strength delta; raw
+        # per-UI-event values = refit storm = pipeline stall = SOURCE
+        # AUDIO BLEEDS THROUGH. The engine is owned by the pacer thread
+        # (only step() mutates it) and recreated per Connect.
+        self._glide = param_glide_mod.GlideEngine()
+        # prompt_blend / timbre_strength ride dedicated WS messages (the
+        # params handler rejects them). Targets written by the main
+        # thread under self._lock; the PACER glides + sends them at most
+        # every 40 ms (was: immediate send per UI event — a click storm
+        # post-deploy).
+        self._blend_targets: dict[str, float] = {}
+        self._blend_senders = {
+            "prompt_blend": param_glide_mod.ThrottledSender(),
+            "timbre_strength": param_glide_mod.ThrottledSender(),
+        }
+
         # Inbound message queue — populated by the WS recv thread, drained
         # on the main TD thread (OnTick / 8 ms timer). TD forbids touching
         # any operator from a non-main thread, so we MUST marshal here.
@@ -689,6 +709,13 @@ class DemonExt:
             # Sync the pacer thread's LoRA-filter cache to the current
             # toggle state before any params flow.
             self._refresh_enabled_loras_cache()
+            # Fresh send-shaping state: first-seen keys snap (the
+            # post-ready re-assert must go out verbatim, not glide from
+            # a previous session's values).
+            self._glide = param_glide_mod.GlideEngine()
+            self._blend_targets.clear()
+            for sender in self._blend_senders.values():
+                sender.reset()
 
             # --- Direct mode --------------------------------------------------
             if mode == "direct":
@@ -920,6 +947,7 @@ class DemonExt:
             self._ws_url = None
             self._expires_at_ms = None
             self._dirty.clear()
+            self._blend_targets.clear()
             # Detach the router BEFORE clearing the ring — a recv
             # thread still draining frames must not patch (or re-init)
             # the ring after we wipe it.
@@ -1316,8 +1344,13 @@ class DemonExt:
             self.log(f"_resend_prompt_for_lora_change failed: {e}")
 
     def SetPromptBlend(self, value: float | None = None) -> None:
+        """Set the prompt A/B blend target. Lands on the wire within
+        ~one pacer tick + glide (the pacer thread owns the dedicated
+        set_prompt_blend message; see src/param_glide.py) — no longer an
+        immediate synchronous send."""
         v = value if value is not None else float(self._read_par("Promptblend", 0.4))
-        self._send_text(wire.encode_set_prompt_blend(v))
+        with self._lock:
+            self._blend_targets["prompt_blend"] = float(v)
 
     def EnableLora(self, id: str, strength: float = 1.0) -> None:
         self._send_text(wire.encode_enable_lora(id, strength=strength))
@@ -1326,7 +1359,9 @@ class DemonExt:
         self._send_text(wire.encode_disable_lora(id))
 
     def SetTimbreStrength(self, value: float) -> None:
-        self._send_text(wire.encode_set_timbre_strength(float(value)))
+        """Set the timbre-strength target (paced like SetPromptBlend)."""
+        with self._lock:
+            self._blend_targets["timbre_strength"] = float(value)
 
     def SetTimbreSource(self, chop: Any = None, name: str = "td_timbre",
                         file_path: str | None = None) -> None:
@@ -1581,21 +1616,15 @@ class DemonExt:
             # prompts and LoRAs" failure mode). Source: web client's
             # useParamSync.ts deletes the same three from `raw` before
             # sending.
-            if wire_name == "prompt_blend":
-                if self._connected:
-                    try:
-                        self._send_text(
-                            wire.encode_set_prompt_blend(float(value)))
-                    except Exception as e:
-                        self.log(f"set_prompt_blend send failed: {e}")
-                return
-            if wire_name == "timbre_strength":
-                if self._connected:
-                    try:
-                        self._send_text(
-                            wire.encode_set_timbre_strength(float(value)))
-                    except Exception as e:
-                        self.log(f"set_timbre_strength send failed: {e}")
+            # prompt_blend / timbre_strength: write the TARGET; the
+            # pacer thread glides toward it (~250 ms) and sends the
+            # dedicated message at most every 40 ms. The old immediate
+            # per-UI-event send was a conditioning-mutation storm during
+            # drags on the post-2026-06 backend (audible clicks + source
+            # bleed — same failure the VST fixed the day of the deploy).
+            if wire_name in ("prompt_blend", "timbre_strength"):
+                with self._lock:
+                    self._blend_targets[wire_name] = float(value)
                 return
             if wire_name == "lora_blend":
                 # UI-only knob in the web client too — it fans out into
@@ -1966,11 +1995,40 @@ class DemonExt:
                 self._params_snapshot.update(self._dirty)
                 self._dirty.clear()
             raw = dict(self._params_snapshot)
+            blend_targets = dict(self._blend_targets)
+        # Filter BEFORE the glide step so disabled-LoRA keys vanish from
+        # the target set and the engine drops their debounce state.
         raw = P.filter_params_for_wire(raw, self._enabled_loras_cache)
+        # Send shaping: lora_str_* debounce (one refit per gesture) +
+        # blend glide. Blends ride along through the same engine, then
+        # get popped — they must NEVER stay in the params raw dict (the
+        # server's params handler rejects them and closes the WS).
+        shaped = self._glide.step({**raw, **blend_targets})
+        for key, sender in self._blend_senders.items():
+            if key not in blend_targets:
+                continue
+            v = shaped.pop(key, None)
+            if v is None:
+                continue
+            if sender.poll(float(v)):
+                try:
+                    if key == "prompt_blend":
+                        self._pacer_send(
+                            wire.encode_set_prompt_blend(float(v)))
+                    else:
+                        self._pacer_send(
+                            wire.encode_set_timbre_strength(float(v)))
+                except Exception:
+                    # Blend sends are best-effort; the params stream's
+                    # fail streak is the dead-socket detector.
+                    pass
+        # Belt-and-suspenders: strip any blend key that slipped through.
+        for key in self._blend_senders:
+            shaped.pop(key, None)
         # The LoopBuffer's actual read position (in seconds) — mirrors
         # demon-public-demo's session.player.positionSec.
         playback_sec = self._ring.position / wire.SAMPLE_RATE
-        return wire.encode_params(raw, playback_sec)
+        return wire.encode_params(shaped, playback_sec)
 
     def _pacer_send(self, msg: str) -> bool:
         """Enqueue-only send for the pacer thread. NEVER route through
@@ -3690,7 +3748,7 @@ class DemonExt:
         hit when fiddling with prompts / LoRAs.
         """
         seeded = 0
-        dedicated_sends: list[tuple[str, float]] = []
+        n_blends = 0
         with self._lock:
             for p in P.PARAMS:
                 if p.category != "continuous" or not p.wire_name:
@@ -3705,24 +3763,23 @@ class DemonExt:
                 wn = p.wire_name
                 if wn in self._PARAMS_NOT_FOR_WIRE:
                     if wn in ("prompt_blend", "timbre_strength"):
-                        dedicated_sends.append((wn, float(value)))
+                        # Blend targets for the pacer thread. Connect()
+                        # recreated the GlideEngine, so these are
+                        # first-seen → snap → sent verbatim next tick.
+                        self._blend_targets[wn] = float(value)
+                        n_blends += 1
                     # lora_blend: UI-only, no engine route, skip.
                     continue
                 self._dirty[wn] = value
                 seeded += 1
-        # Fire the dedicated messages outside the lock so we don't hold
-        # it during _send_text.
-        for wn, value in dedicated_sends:
-            try:
-                if wn == "prompt_blend":
-                    self._send_text(wire.encode_set_prompt_blend(value))
-                elif wn == "timbre_strength":
-                    self._send_text(wire.encode_set_timbre_strength(value))
-            except Exception as e:
-                self.log(f"seed {wn} send failed: {e}")
+        # Force the throttlers to re-send even if the value matches what
+        # a previous session last sent — the re-assert after (re)connect
+        # must not be epsilon-suppressed.
+        for sender in self._blend_senders.values():
+            sender.reset()
         self.log(
             f"seeded {seeded} continuous params into _dirty for first tick"
-            f" (+{len(dedicated_sends)} dedicated)")
+            f" (+{n_blends} blend targets)")
 
     def _push_interp_methods(self) -> None:
         """Send the current per-path interpolation method for all four
