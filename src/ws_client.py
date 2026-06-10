@@ -111,6 +111,10 @@ class WSClient:
         self._ws: websocket.WebSocket | None = None
         self._thread: threading.Thread | None = None
         self._closing = False
+        # Close code parsed out of a server-sent close frame (see
+        # _dispatch_frame); preferred over websocket-client's
+        # close_status_code, which stays None under control_frame=False.
+        self._server_close_code: int | None = None
         # Close code the recv thread should use when it tears the socket
         # down (set by close()). Kept so the actual socket .close() happens
         # on the recv thread — never concurrently with its recv.
@@ -145,6 +149,7 @@ class WSClient:
             self._thread.start()
 
     def _run(self) -> None:
+        self._server_close_code = None
         try:
             self._log(f"[ws_client] dialing {self.url}")
             self._ws = websocket.create_connection(self.url, timeout=self._timeout)
@@ -206,44 +211,19 @@ class WSClient:
                     close_reason = f"recv error: {type(e).__name__}: {e}"
                     break
 
-                if opcode == websocket.ABNF.OPCODE_TEXT:
-                    if isinstance(data, bytes):
-                        try:
-                            text = data.decode("utf-8")
-                        except UnicodeDecodeError:
-                            text = data.decode("utf-8", errors="replace")
-                    else:
-                        text = data
-                    if self._on_text:
-                        try:
-                            self._on_text(text)
-                        except Exception as e:
-                            self._log(f"[ws_client] on_text raised: {e}")
-                elif opcode == websocket.ABNF.OPCODE_BINARY:
-                    if self._on_binary:
-                        try:
-                            self._on_binary(data)
-                        except Exception as e:
-                            self._log(f"[ws_client] on_binary raised: {e}")
-                elif opcode == websocket.ABNF.OPCODE_CLOSE:
-                    # The close frame payload carries the server's code +
-                    # reason (2-byte BE code, then UTF-8 text). Because we
-                    # recv with control_frame=False, websocket-client hands
-                    # the raw frame to US and never fills close_status_code
-                    # — parse it here or the pod's last words (e.g.
-                    # `1011 "TRT engine not built"`) are thrown away and
-                    # every server close logs as code=None.
-                    close_code, why = parse_close_frame(data)
-                    close_reason = (f"server sent close: {why}" if why
-                                    else "server sent close")
+                reason = self._dispatch_frame(opcode, data)
+                if reason is not None:
+                    close_reason = reason
                     break
                 # Ping/Pong handled by recv_data's control_frame=False filter.
         finally:
             try:
                 if self._ws is not None:
                     if close_code is None:
-                        close_code = getattr(self._ws, "close_status_code",
-                                             None)
+                        close_code = (self._server_close_code
+                                      if self._server_close_code is not None
+                                      else getattr(self._ws,
+                                                   "close_status_code", None))
                     self._ws.close(status=self._req_close_code)
             except Exception:
                 pass
@@ -328,6 +308,116 @@ class WSClient:
         return self._enqueue(websocket.ABNF.OPCODE_BINARY, payload,
                              "send_binary")
 
+    def _dispatch_frame(self, opcode: int, data) -> str | None:
+        """Handle one received data/close frame. Shared by the main recv
+        loop and the between-fragments socket servicing in
+        _send_fragmented. Returns a close-reason string when the
+        connection should stop, else None."""
+        if opcode == websocket.ABNF.OPCODE_TEXT:
+            if isinstance(data, bytes):
+                try:
+                    text = data.decode("utf-8")
+                except UnicodeDecodeError:
+                    text = data.decode("utf-8", errors="replace")
+            else:
+                text = data
+            if self._on_text:
+                try:
+                    self._on_text(text)
+                except Exception as e:
+                    self._log(f"[ws_client] on_text raised: {e}")
+            return None
+        if opcode == websocket.ABNF.OPCODE_BINARY:
+            if self._on_binary:
+                try:
+                    self._on_binary(data)
+                except Exception as e:
+                    self._log(f"[ws_client] on_binary raised: {e}")
+            return None
+        if opcode == websocket.ABNF.OPCODE_CLOSE:
+            # The close frame payload carries the server's code + reason
+            # (2-byte BE code, then UTF-8 text). Because we recv with
+            # control_frame=False, websocket-client hands the raw frame
+            # to US and never fills close_status_code — parse it here or
+            # the pod's last words (e.g. `1011 "keepalive ping timeout"`)
+            # are thrown away and every server close logs as code=None.
+            code, why = parse_close_frame(data)
+            self._server_close_code = code
+            return (f"server sent close: {why}" if why
+                    else "server sent close")
+        return None
+
+    # Outbound messages above this size are sent as continuation
+    # fragments with a socket-service pause between them. A single
+    # multi-MB ws.send() (the ~46 MB initial audio upload for a 120 s
+    # stereo source) blocks this — the ONLY — socket thread for the
+    # whole TLS push; on a slow uplink that outlives the server's
+    # keepalive ping window and the pod closes with
+    # 1011 "keepalive ping timeout".
+    _SEND_FRAGMENT_BYTES = 1 << 20  # 1 MiB
+    # How long each between-fragments service pause may wait on the
+    # socket. Long enough to pick up a pending PING, short enough that
+    # the pauses add <1 s to a 46-fragment upload.
+    _SERVICE_TIMEOUT = 0.01
+
+    def _send_fragmented(self, opcode: int, payload: bytes | str) -> str | None:
+        """Send one large message as RFC 6455 continuation fragments,
+        servicing the socket between fragments so server PINGs are
+        auto-ponged mid-upload (recv_data answers them internally).
+        Control frames may legally interleave with a fragmented message
+        (§5.4); other queued DATA messages may NOT, so params wait for
+        the final fragment. Runs ONLY on the recv thread."""
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8")
+        total = len(payload)
+        off = 0
+        first = True
+        while off < total:
+            chunk = payload[off:off + self._SEND_FRAGMENT_BYTES]
+            off += len(chunk)
+            fin = 1 if off >= total else 0
+            op = opcode if first else websocket.ABNF.OPCODE_CONT
+            first = False
+            try:
+                self._ws.settimeout(self._timeout)
+                self._ws.send_frame(
+                    websocket.ABNF.create_frame(chunk, op, fin))
+            except Exception as e:
+                return f"send failed: {type(e).__name__}: {e}"
+            finally:
+                try:
+                    self._ws.settimeout(self._RECV_TIMEOUT)
+                except Exception:
+                    pass
+            if not fin:
+                reason = self._service_socket_once()
+                if reason is not None:
+                    return reason
+        return None
+
+    def _service_socket_once(self) -> str | None:
+        """Briefly read the socket between fragments of a large send. A
+        pending server PING is answered inside recv_data (auto-pong);
+        a data/close frame is dispatched exactly like the main loop's.
+        Returns a close-reason string when the connection should stop."""
+        try:
+            self._ws.settimeout(self._SERVICE_TIMEOUT)
+            opcode, data = self._ws.recv_data(control_frame=False)
+        except websocket.WebSocketTimeoutException:
+            return None
+        except websocket.WebSocketConnectionClosedException as e:
+            return f"closed: {e}"
+        except Exception as e:
+            return f"recv error: {type(e).__name__}: {e}"
+        finally:
+            try:
+                self._ws.settimeout(self._RECV_TIMEOUT)
+            except Exception:
+                pass
+        self._n_recv += 1
+        self._last_recv_t = time.monotonic()
+        return self._dispatch_frame(opcode, data)
+
     def _flush_outbound(self) -> str | None:
         """Send every queued outbound frame. Runs ONLY on the recv thread.
         Returns a close-reason string on write failure, else None."""
@@ -336,13 +426,22 @@ class WSClient:
                 opcode, payload = self._outbound.get_nowait()
             except queue.Empty:
                 return None
+            if len(payload) > self._SEND_FRAGMENT_BYTES and opcode in (
+                    websocket.ABNF.OPCODE_TEXT,
+                    websocket.ABNF.OPCODE_BINARY):
+                err = self._send_fragmented(opcode, payload)
+                if err is not None:
+                    return err
+                self._n_sent += 1
+                continue
             try:
                 # The recv loop runs a short socket timeout (RECV_TIMEOUT)
-                # for responsiveness. A send can be large (the multi-MB
-                # initial audio upload) and would spuriously time out at
-                # that short value, so give each write the full timeout,
-                # then restore the short one for the next recv. Same
-                # thread, so no concurrency concern.
+                # for responsiveness. A send can be moderately large and
+                # would spuriously time out at that short value, so give
+                # each write the full timeout, then restore the short one
+                # for the next recv. Same thread, so no concurrency
+                # concern. (Sends above _SEND_FRAGMENT_BYTES take the
+                # fragmented path above instead.)
                 self._ws.settimeout(self._timeout)
                 self._ws.send(payload, opcode=opcode)
                 self._n_sent += 1

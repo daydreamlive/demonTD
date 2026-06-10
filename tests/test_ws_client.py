@@ -180,3 +180,77 @@ def test_parse_close_frame_bad_utf8_never_raises():
     code, reason = wsc_mod.parse_close_frame(payload)
     assert code == 1011
     assert "broken" in reason
+
+
+# ---------------------------------------------------------------------------
+# Large-send fragmentation (keepalive pings answered mid-upload)
+# ---------------------------------------------------------------------------
+
+class FakeWSFrag(FakeWS):
+    """FakeWS + the fragmented-send surface (send_frame / recv_data)."""
+
+    def __init__(self, recv_results=None):
+        super().__init__()
+        self.frames: list[tuple[bytes, int, int]] = []  # (data, opcode, fin)
+        self.recv_calls = 0
+        # Each _service_socket_once pops one entry; empty -> timeout
+        # (the common "nothing pending on the socket" case).
+        self._recv_results = list(recv_results or [])
+
+    def send_frame(self, frame):
+        self.frames.append((frame.data, frame.opcode, frame.fin))
+
+    def recv_data(self, control_frame=False):
+        self.recv_calls += 1
+        if self._recv_results:
+            return self._recv_results.pop(0)
+        raise websocket.WebSocketTimeoutException()
+
+
+def test_big_send_is_fragmented_and_services_socket():
+    c = _make_client()
+    c._ws = FakeWSFrag()
+    payload = bytes(range(256)) * (5 * 4096 + 13)  # ~5.0 MB, odd tail
+    assert c.send_binary(payload) is True
+    err = c._flush_outbound()
+    assert err is None
+
+    frames = c._ws.frames
+    assert len(frames) > 1, "payload above the threshold must fragment"
+    # First frame opens the message; the rest are continuations; only
+    # the last has fin set.
+    assert frames[0][1] == websocket.ABNF.OPCODE_BINARY and frames[0][2] == 0
+    for _data, op, fin in frames[1:-1]:
+        assert op == websocket.ABNF.OPCODE_CONT and fin == 0
+    assert frames[-1][1] == websocket.ABNF.OPCODE_CONT
+    assert frames[-1][2] == 1
+    # Reassembly is byte-identical and chunks respect the fragment size.
+    assert b"".join(d for d, _o, _f in frames) == payload
+    assert all(len(d) <= c._SEND_FRAGMENT_BYTES for d, _o, _f in frames)
+    # The socket was serviced between every pair of fragments — that's
+    # where a pending server PING gets auto-ponged.
+    assert c._ws.recv_calls == len(frames) - 1
+    # No monolithic send for the big payload.
+    assert c._ws.sent == []
+
+
+def test_small_send_stays_monolithic():
+    c = _make_client()
+    c._ws = FakeWSFrag()
+    c.send_binary(b"x" * 1024)
+    assert c._flush_outbound() is None
+    assert c._ws.frames == []
+    assert [p for p, _ in c._ws.sent] == [b"x" * 1024]
+
+
+def test_server_close_mid_upload_aborts_send():
+    c = _make_client()
+    close_payload = (1011).to_bytes(2, "big") + b"keepalive ping timeout"
+    c._ws = FakeWSFrag(
+        recv_results=[(websocket.ABNF.OPCODE_CLOSE, close_payload)])
+    c.send_binary(b"y" * (3 << 20))  # 3 MiB -> >= 3 fragments
+    err = c._flush_outbound()
+    assert err == "server sent close: keepalive ping timeout"
+    assert c._server_close_code == 1011
+    # Upload stopped early — far fewer frames than the full payload.
+    assert len(c._ws.frames) < 3
