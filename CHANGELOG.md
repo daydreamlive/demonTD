@@ -42,6 +42,16 @@ the canonical clients:
   dedicated contract parser reads EVENT_NAMES / COMMAND_NAMES /
   SessionConfigPayload. Green against origin/main AND pre-refactor refs.
 
+### Knob-to-ear latency shavings
+
+- **WS outbound flush gap eliminated** (`_RECV_TIMEOUT` 0.1 → 0.01 s).
+  All sends go out via the recv thread (single-thread-socket
+  invariant), which only flushes the outbound queue when `recv()`
+  returns — on a quiet socket every outgoing message (params, blends,
+  prompts) sat queued for up to 100 ms. Now ≤ ~10 ms.
+- **Pacer cadence 16 → 8 ms**, matching the web client's `TICK_MS`
+  exactly (125 params/s).
+
 Tests: 204 (up from 181). Out of scope, tracked for later: dcw_* /
 rcfg / guidance knob parity (predates the deploy; server defaults
 apply).

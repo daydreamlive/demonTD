@@ -1664,7 +1664,7 @@ class DemonExt:
           1. Drain the WS recv thread's inbound message queue (so server
              messages can safely touch TD operators).
           2. Sample scheduled curves into _dirty (TD par reads — main
-             thread only); the pacer picks them up within ~16 ms.
+             thread only); the pacer picks them up within ~8 ms.
           3. Debug telemetry.
         """
         # First-tick beacon so we can confirm the timer is firing. Gated:
@@ -1778,7 +1778,7 @@ class DemonExt:
 
         # NOTE: OnTick no longer sends params. The dedicated pacer
         # THREAD (src/params_pacer.py) owns the continuous params
-        # stream — the keepalive — at a steady ~16 ms cadence that
+        # stream — the keepalive — at a steady ~8 ms cadence that
         # survives TD main-thread hitches. OnTick's remaining jobs are
         # the queue drain, curve sampling (TD pars — main thread only),
         # and the telemetry above. The dirty→snapshot merge moved into
