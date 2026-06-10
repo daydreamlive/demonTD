@@ -3,7 +3,7 @@
 > **THIS OPERATOR IS IN BETA.**
 > We welcome feedback, ideas, and contributions.
 
-TouchDesigner operator for **DEMON** — real-time AI music generation.
+TouchDesigner operator for **DEMON** — real-time AI music generation. Tested on 2025.32820
 
 Drop the operator into any TouchDesigner project, point it at a DEMON server,
 hit Connect, and you'll hear AI-generated audio playing through your speakers.
