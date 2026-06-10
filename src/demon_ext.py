@@ -344,7 +344,7 @@ def eval_curve_linear(pts: list[tuple[float, float]], t: float) -> float:
 
 # Bump this on every meaningful change so the user can confirm at boot
 # which build is actually loaded. Visible on the "DemonExt initialized" line.
-BUILD_MARKER = "v0.2.16-audio-smoothness+hb-worker+params-pacer+binary-router+cb-hygiene+bug-sweep"
+BUILD_MARKER = "v0.2.17-post-deploy-fixes+vae-window-0.36+lora-debounce+blend-pacing+command-failed+drift-sdk"
 
 # Hosted-mode pod failover cap. When a hosted WS opens but never reaches
 # `ready` (1011 keepalive / overloaded pod / etc.), we leave the dead

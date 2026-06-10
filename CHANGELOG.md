@@ -2,6 +2,50 @@
 
 All notable changes to demonTD. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.17] — 2026-06-10
+
+### Post-deploy regression fixes (slow params + source bleed)
+
+The 2026-06-09/10 backend deploy surfaced two latent divergences from
+the canonical clients:
+
+- **`vae_window` default 6.0 → 0.36** (the "params apply slowly" bug).
+  The canonical web client has sent 0.36 all along; the new backend
+  makes a 6 s rolling-regen window pathological — param changes only
+  become audible when the window regenerates. rtmg-vst made the same
+  change the day of the deploy. **Existing .toe files keep the saved
+  6.0** until the par is touched — Connect now logs a loud warning when
+  `vae_window > 1.0` so the state is self-diagnosing.
+- **Send shaping for params** (the "source audio leaks through when
+  changing params" bug) — new `src/param_glide.py`, always-on, VST
+  parity. The new backend re-fits LoRA weights per >0.02 strength
+  delta; raw per-UI-event values made one drag a refit storm → pipeline
+  stall → stale latents → source bleed. Now: `lora_str_*` gets a 300 ms
+  trailing-edge debounce (one refit per gesture); `prompt_blend` /
+  `timbre_strength` glide (~250 ms one-pole) on the pacer thread with
+  their dedicated messages throttled to 40 ms + trailing flush
+  (previously: immediate sends per UI event, dozens/sec during drags);
+  everything else (denoise / structure / feedback / seed / curves)
+  streams raw exactly as before.
+- **`command_failed` handler**: the new backend rejects capability-gated
+  commands explicitly; rejections now surface in the textport + Status
+  par instead of looking like "my knob does nothing". `ready`'s new
+  capabilities field is logged each connect (geometry / knob_manifest /
+  lora_pending_enable Debug-gated; the pod-side `session_id` in ready is
+  deliberately NOT adopted — hosted extend/leave key off the queue's id).
+- **Drift checker un-blinded**: the demo repo's SDK refactor moved the
+  protocol sources into `sdk/` and merged types into a generated
+  `wireContract.gen.ts` — the checker's reference paths 404'd, and naive
+  re-pointing would have silently passed with empty sets (which is how
+  this deploy shipped past us). Reference files are now candidate-path
+  lists (sdk/ first, legacy fallback — old refs still compare), and a
+  dedicated contract parser reads EVENT_NAMES / COMMAND_NAMES /
+  SessionConfigPayload. Green against origin/main AND pre-refactor refs.
+
+Tests: 204 (up from 181). Out of scope, tracked for later: dcw_* /
+rcfg / guidance knob parity (predates the deploy; server defaults
+apply).
+
 ## [0.2.16] — 2026-06-09
 
 ### Big one: "occasionally choppy" audio — root causes found and fixed
