@@ -2,6 +2,80 @@
 
 All notable changes to demonTD. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Contract-based protocol parity (replaces the regex drift checker)
+
+The DEMON backend is self-describing (`protocol.py::wire_contract()`,
+served live at `GET /api/protocol`). demonTD now vendors that registry —
+plus the web UI's parity data (canonical labels, `config.json` starting
+values, the `loraTriggers.ts` blob SHA) — into
+`vendor/demon_contract.json` and tests itself against it. demon-public-demo
+is out of the loop entirely.
+
+- **`scripts/sync_contract.py`** — extracts the contract from
+  `DEMON@origin/main` via `git show` (never the working tree). Candidate
+  paths + hard failures everywhere: if DEMON restructures, the sync
+  fails loudly by name instead of going silently blind (the failure
+  mode that bit the old checker in the 2026-06 SDK refactor).
+- **`tests/test_contract.py`** — the drift checker is now the test
+  suite. Coverage vs the old `check_protocol_drift.py` categories:
+  server msg types → `test_event_dispatch_parity`; client msg types
+  (and the hand-kept `encoder_to_wire` table) → encoder tests, both
+  directions, no table; slice flags/constants → `test_slice_constants`;
+  SessionConfig fields → field-parity test on the real builder;
+  ui_coverage / label_parity / lora_trigger_injection / tags_b_plumbing
+  → ported. **Net-new coverage the old checker never had:** per-field
+  payload schema validation, enum option sets, knob ranges/types,
+  default values vs the web installation, reverse-direction checks
+  (new knobs/events flag the day they land upstream), whitelist
+  hygiene (an intentional-gap entry that goes stale or gets implemented
+  fails the suite).
+- **Runtime drift check** — at connect, the op GETs the pod's
+  `/api/protocol` + `/api/knobs` off the main thread and surfaces
+  vocabulary drift as a one-shot ⚠ Status warning. A stale .tox now
+  says it's stale instead of mysteriously misbehaving.
+- **Nightly auto-PR** — `.github/workflows/contract-sync.yml` re-syncs
+  the artifact from DEMON@main; on drift, a Claude agent drafts the
+  parity fix and one rolling PR (`contract-sync/auto`) carries the
+  upstream compare, sync summary, and test results. Degrades to a
+  detection-only PR if the agent can't finish. Plain pytest CI added
+  (`tests.yml`). The old `protocol-drift.yml` + 947-line regex checker
+  are deleted; the `DEMON_DEMO_PAT` secret and the demon-public-demo
+  sibling checkout are no longer needed.
+
+### Fixed (real drift the new tests caught on day one)
+
+- `Vaewindow` default 6.0 → **0.36** (web installation default — the
+  v0.2.15-era default regression, now impossible to reintroduce).
+- `Shift` range [0,1] default 0.5 → **[1,6] default 3.5**: the server
+  clamps into the registry band, so the entire old range was dead
+  travel pinned at 1.0.
+- `Hintstrength` (Structure) 1.4/[0,2] → **1.0/[0,1]**: values above
+  1.0 were server-clamped; the slider's top half did nothing.
+- `Guidancescale` default 7.0 → **2.5** (web starting value), min 0 →
+  **1.0** (registry floor).
+- `Denoise` (Strength) default 0.85 → **0.7** (web starting value).
+- `Rcfgmode` menu gained **`full`**; default `off` → **`initialize`**
+  (web starting value).
+- `Odenoise` param **removed** — the server deleted the scalar
+  `ode_noise` knob from its registry; the slider was dead on the wire.
+- New **`command_failed`** handler: the server's loud-failure event
+  (e.g. LoRA commands on a lora-disabled session) now logs the rejected
+  command + reason and shows in Status instead of the unknown-kind log.
+
+### Changed
+
+- `_on_text` dispatches through `events.EVENT_HANDLERS` (src/events.py);
+  SessionConfig assembly extracted to pure `src/session_config.py` with
+  defaults sourced from `params.py`. Both are now contract-testable
+  outside TD.
+- `scripts/canary.py`'s `KNOWN_SERVER_KINDS` is derived from
+  `events.EVENT_HANDLERS` + the whitelist instead of hand-copied.
+- `scripts/release.sh` gates on contract freshness
+  (`sync_contract.py --check`) + pytest; requires `~/git/DEMON`
+  (override `DEMON_REPO`) instead of demon-public-demo.
+
 ## [0.2.16] — 2026-06-09
 
 ### Big one: "occasionally choppy" audio — root causes found and fixed

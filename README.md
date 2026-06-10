@@ -159,13 +159,15 @@ credits — check the API-keys dashboard for billing info.
 | **Session** | Connect / Disconnect, **Mode** (Direct / Hosted), Server URL (direct), Hosted Base URL + API Key + Paste API Key (hosted), Queue Position / Expires in / Deny reason (hosted readouts), Still playing? pulse (hosted), Source Audio File, Status, **Python Audio Out** toggle, **Debug Logging** toggle. |
 | **Init** | Session-start params (`sde`, `lora`, `depth`, `vae_window`, `crop`, `steps`, `fast_vae`, `walk_window`, `walk_window_s`, Initial Prompt, Initial Prompt B, Fixture Name). Editing while connected reverts + prompts you to Reconnect. |
 | **Prompt+LoRA** | Send Prompt pulse, Prompt (multiline), Key (70-keyscale menu), Time Signature, Prompt Blend, LoRA Blend, dynamic per-LoRA enable + strength rows populated from the server's `lora_catalog`. |
-| **Synthesis** | Denoise, Seed, Feedback, Shift, Hint Strength, Timbre Strength, Guidance Scale, CFG Rescale, ODE Noise, Periodicity, 8× channel groups (`ch_g0..ch_g7`), 6× keystone channels (`ch13, ch14, ch19, ch23, ch29, ch56`). |
+| **Synthesis** | Strength (`denoise`), Seed, Feedback, Shift, Structure (`hint_strength`), Timbre Strength, Guidance Scale, CFG Rescale, Periodicity, 8× channel groups (`ch_g0..ch_g7`), 6× keystone channels (`ch13, ch14, ch19, ch23, ch29, ch56`). |
 | **RCFG+DCW** | RCFG Mode menu, DCW block (`enabled`, `mode`, `scaler`, `high_scaler`, `wavelet`, `mult_blend`, `mag_phase`, `soft_thresh`). |
 | **Curves** | JSON spec strings for `sde_denoise_curve`, `ode_noise_curve`, `x0_target_curve`, `velocity_scale_curve`, `initial_noise_curve`. |
 | **Sources** | Swap Source, Set/Clear Timbre Source, Set/Clear Structure Source, fixture-name fields for both. |
 
-All defaults are aligned with `demon-public-demo` so you get the same
-out-of-the-box sound as the web client.
+All defaults are aligned with the DEMON web installation (its
+`config.json` starting values) so you get the same out-of-the-box sound
+as the web client — enforced by the contract tests against the vendored
+`vendor/demon_contract.json`.
 
 ## Python API
 

@@ -177,15 +177,20 @@ def destroy_instance(instance_id: str) -> None:
 # Canary
 # ----------------------------------------------------------------------------
 
-# Set of `kind` values our `_on_text` in demon_ext.py handles. Kept in
-# sync manually with src/demon_ext.py — protocol-drift CI catches the
-# additions.
-KNOWN_SERVER_KINDS = {
-    "ready", "ready_blob", "params_update", "lora_catalog",
-    "structure_ready", "timbre_ready", "swap_ready",
-    "fixture_ready", "stem_assets", "stem_ready",
-    "_invalid",
-}
+# `kind` values demonTD handles (events.EVENT_HANDLERS — the same table
+# _on_text dispatches through) plus the whitelisted intentionally-ignored
+# events. Derived, not hand-copied: contract CI keeps EVENT_HANDLERS
+# aligned with the server registry, and this inherits it.
+import events as _events  # noqa: E402
+
+with open(ROOT / "contracts" / "parity_whitelist.json") as _f:
+    _IGNORED_EVENTS = set(json.load(_f).get("events_ignored", {}))
+
+KNOWN_SERVER_KINDS = (
+    set(_events.EVENT_HANDLERS)
+    | _IGNORED_EVENTS
+    | {"_invalid"}  # decode_control's marker for non-dict JSON
+)
 
 # Slice flags we accept. Anything else triggers FAIL.
 KNOWN_SLICE_FLAGS = {wire.SLICE_FLAG_RAW, wire.SLICE_FLAG_DELTA}
@@ -304,7 +309,8 @@ def run_canary(ws_url: str, duration_s: float = 30.0) -> None:
     if unknown_kinds:
         raise AssertionError(
             f"server sent unhandled JSON `type`s: {sorted(unknown_kinds)} "
-            f"-- run `python scripts/check_protocol_drift.py` for details."
+            f"-- run `python scripts/sync_contract.py` then "
+            f"`PYTHONPATH=src pytest tests/test_contract.py` for details."
         )
     if unknown_flags:
         # Server flag bits beyond 0/1 (e.g. the 0x07 stem flag) ought to
