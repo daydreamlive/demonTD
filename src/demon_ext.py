@@ -2970,6 +2970,20 @@ class DemonExt:
             # (_on_ws_text → router.sniff_text) — by the time we drain
             # this event, the recv thread may already have processed the
             # initial buffer. Nothing binary-routing-related here.
+            #
+            # Phase-2 contract surface (post-2026-06 backend): ready may
+            # carry geometry / capabilities / knob_manifest /
+            # lora_pending_enable, and ALSO a `session_id`. Do NOT adopt
+            # that session_id — hosted-mode extend/leave key off the
+            # QUEUE's session id, not the pod's.
+            caps = data.get("capabilities")
+            if caps:
+                self.log(f"server capabilities: {caps}")
+            if self._debug_enabled:
+                for k in ("geometry", "knob_manifest",
+                          "lora_pending_enable"):
+                    if data.get(k) is not None:
+                        self.log(f"[ready] {k}={data.get(k)}")
             cat = data.get("lora_catalog") or []
             self._apply_lora_catalog(cat)
             self._seed_dirty_from_current_pars()
@@ -3010,6 +3024,17 @@ class DemonExt:
         elif kind in ("timbre_failed", "structure_failed", "swap_failed", "error"):
             self.log(f"server {kind}: {data.get('error') or data.get('message')}")
             self._set_status(f"Error: {kind}")
+        elif kind == "command_failed":
+            # Post-2026-06 backend: a command was rejected because the
+            # pod's capabilities mask gates it (e.g. timbre=false). Make
+            # the rejection VISIBLE — silently-ignored rejections look
+            # like 'my knob does nothing'.
+            cmd = data.get("command") or "(unknown)"
+            req = data.get("requires") or "(unknown capability)"
+            err = data.get("error") or ""
+            self.log(f"server command_failed: command={cmd!r} "
+                     f"requires={req!r} error={err!r}")
+            self._set_status(f"Server rejected {cmd}: requires {req}")
         elif kind in ("stem_assets", "stem_ready"):
             # Server's stem-separation feature. Two big binary blobs
             # follow (~13 MB each, flag bits we don't decode). The skip
