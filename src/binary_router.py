@@ -295,11 +295,36 @@ class BinaryRouter:
         # Patch-lead telemetry: a slice landing at/behind the playhead
         # means the listener hears STALE loop content where this audio
         # should have been — the "music glitch" flavor of chop.
+        # Server-side timing from the slice header rides along: normal
+        # tick_ms + late patches = the pod generates fine but at a
+        # STALE playhead; huge tick_ms = the pod itself is slow.
         if self._stats is not None:
             try:
                 lead_s, late = telemetry_mod.compute_patch_lead(
                     slice_.start_sample, self._ring.position,
                     self._ring.frames, wire.SAMPLE_RATE)
                 self._stats.note_patch(lead_s, late)
+                self._stats.note_slice_timing(
+                    slice_.tick_ms, slice_.dec_ms, slice_.num_gens)
+            except Exception:
+                pass
+
+        # Debug slice-placement trace (client mirror of the backend's
+        # DEMON_LAT_TRACE): every ~10th slice, log exactly where it
+        # landed relative to the playhead, so a failing session shows
+        # the lag curve directly in the textport.
+        if self._is_debug() and self.n_slices % 10 == 1:
+            try:
+                pos = self._ring.position
+                frames = self._ring.frames
+                lead_s, late = telemetry_mod.compute_patch_lead(
+                    slice_.start_sample, pos, frames, wire.SAMPLE_RATE)
+                self._log(
+                    f"[slice] start={slice_.start_sample / wire.SAMPLE_RATE:.2f}s "
+                    f"pos={pos / wire.SAMPLE_RATE:.2f}s "
+                    f"lead={lead_s:+.2f}s{' LATE' if late else ''} "
+                    f"tick={slice_.tick_ms:.0f}ms dec={slice_.dec_ms:.0f}ms "
+                    f"gens={slice_.num_gens}"
+                )
             except Exception:
                 pass

@@ -147,3 +147,29 @@ def test_concurrent_updates_do_not_explode():
     total += s.drain()["params_sends"]
     assert not errors
     assert total > 0
+
+
+def test_slice_timing_stats():
+    s = SmoothnessStats()
+    s.note_slice_timing(40.0, 20.0, 5)
+    s.note_slice_timing(120.0, 35.0, 6)
+    s.note_slice_timing(80.0, 10.0, 7)
+    snap = s.drain()
+    assert snap["tick_ms_avg"] == 80.0
+    assert snap["tick_ms_max"] == 120.0
+    assert snap["dec_ms_max"] == 35.0
+    assert snap["num_gens"] == 7
+    # Reset semantics
+    snap = s.drain()
+    assert snap["tick_ms_avg"] == 0.0
+    assert snap["tick_ms_max"] == 0.0
+    assert snap["num_gens"] == 0
+
+
+def test_format_line_includes_server_timing():
+    s = SmoothnessStats()
+    s.note_slice_timing(50.0, 25.0, 3)
+    line = SmoothnessStats.format_line(s.drain())
+    assert "tick=50/50ms" in line
+    assert "dec=25ms" in line
+    assert "gens=3" in line

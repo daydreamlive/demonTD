@@ -2890,7 +2890,7 @@ class DemonExt:
             "crop":         float(init_val("Crop", 0.0)),
             "steps":        int(init_val("Steps", 8)),
             "fast_vae":     bool(init_val("Fastvae", False)),
-            "walk_window":  bool(init_val("Walkwindow", False)),
+            "walk_window":  bool(init_val("Walkwindow", True)),
             "walk_window_s": float(init_val("Walkwindows", 60.0)),
             "enabled_loras": self._enabled_loras(),
             "prompt":       str(init_val("Initprompt",
@@ -3772,6 +3772,20 @@ class DemonExt:
                     continue
                 self._dirty[wn] = value
                 seeded += 1
+            # VST-parity raw keys (rtmg-vst collectLiveParams streams
+            # these every tick; the backend falls back to defaults when
+            # missing, but parity removes a divergence class against
+            # the post-2026-06 pods). Both derive from Init pars, which
+            # are immutable while connected, so seeding once at ready
+            # is exact: the pacer re-sends the snapshot every tick.
+            try:
+                self._dirty["steps_override"] = int(
+                    self._read_par("Steps", 8) or 8)
+                self._dirty["method"] = (
+                    "sde" if bool(self._read_par("Sde", False)) else "ode")
+                seeded += 2
+            except Exception:
+                pass
         # Force the throttlers to re-send even if the value matches what
         # a previous session last sent — the re-assert after (re)connect
         # must not be epsilon-suppressed.
@@ -3910,6 +3924,15 @@ class DemonExt:
             return "Connection timed out."
         if "connection to remote host was lost" in low:
             return "Connection lost — re-try Connect."
+        if "sslerror" in low and ("[sys]" in low or "unknown error" in low):
+            # SSL_ERROR_SYSCALL on a write = the peer dropped the TCP
+            # connection with no close-notify. Seen when a pod crashes
+            # or is force-evicted mid-session — a SERVER-side death,
+            # not a client SSL bug (sends are single-threaded since
+            # v0.2.12; don't chase the old corruption ghost).
+            return ("Connection reset by server — the pod likely "
+                    "crashed or was evicted. Re-try Connect; if it "
+                    "recurs, check pod logs.")
         # Fall through. Trim aggressively so the Status par doesn't go
         # multi-line; the full reason is still in textport via the
         # [ws_client] closed line that fires before this.

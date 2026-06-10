@@ -160,3 +160,12 @@ def test_restart_after_stop():
     pacer.start()
     assert pacer.is_alive
     pacer.stop()
+
+
+def test_vst_parity_keys_pass_through_glide():
+    """steps_override (int) and method (str) are seeded into the params
+    raw at ready (VST parity) — the glide layer must pass them verbatim."""
+    from param_glide import GlideEngine
+    eng = GlideEngine(now=lambda: 0.0)
+    out = eng.step({"steps_override": 8, "method": "ode"}, now=0.0)
+    assert out == {"steps_override": 8, "method": "ode"}

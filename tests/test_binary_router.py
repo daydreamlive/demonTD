@@ -262,3 +262,19 @@ def test_sniff_ignores_non_routing_messages_cheaply():
     # No state change, no crash.
     router.handle_binary(_initial_buffer_bytes(SR))
     assert ring.frames == 0  # still not expecting initial
+
+
+def test_slice_timing_recorded_in_stats():
+    """tick_ms/dec_ms/num_gens from the slice header reach telemetry —
+    the discriminator between 'pod is slow' and 'pod has a stale
+    playhead' when slices land in the wrong place."""
+    stats = SmoothnessStats()
+    router, ring, _, _ = _make_router(stats=stats)
+    router.sniff_text(_ready_msg())
+    router.handle_binary(_initial_buffer_bytes(SR))
+    pcm = np.full(480 * CH, 0.5, dtype=np.float32)
+    router.handle_binary(_slice_bytes(1000, pcm))  # tick=1.0 dec=2.0 gens=1
+    snap = stats.drain()
+    assert snap["tick_ms_avg"] == 1.0
+    assert snap["dec_ms_max"] == 2.0
+    assert snap["num_gens"] == 1

@@ -196,8 +196,14 @@ INIT_PARAMS: list[Param] = [
     Param("Fastvae", "fast_vae", "Init", "Toggle", "init", default=False, order=70,
           label="Fast VAE", help="Use dreamvae distilled decoder (TensorRT only). "
                                   "Off matches demon-public-demo default."),
-    Param("Walkwindow", "walk_window", "Init", "Toggle", "init", default=False, order=80,
-          label="Walk Window", help="For long sources, use 60s engine at boundaries."),
+    Param("Walkwindow", "walk_window", "Init", "Toggle", "init", default=True, order=80,
+          label="Walk Window",
+          help="Route sources longer than Walk Window (s) through the 60s "
+               "DiT engine, swapping latents at boundaries. The deployed "
+               "web client and the VST both send True — fleet pods expect "
+               "it for long sources (off = the whole source is thrown at "
+               "the engine at once). No effect for sources shorter than "
+               "Walk Window (s)."),
     Param("Walkwindows", "walk_window_s", "Init", "Float", "init", default=60.0,
           min=1.0, max=240.0, clamp_min=True, order=90,
           label="Walk Window (s)", help="Walk window duration in seconds."),

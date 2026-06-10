@@ -52,7 +52,32 @@ the canonical clients:
 - **Pacer cadence 16 → 8 ms**, matching the web client's `TICK_MS`
   exactly (125 params/s).
 
-Tests: 204 (up from 181). Out of scope, tracked for later: dcw_* /
+### Playhead-lag investigation tooling (server generates behind the playhead)
+
+Post-deploy sessions on SHORT (≤60s) sources show the pod's write
+position drifting behind the client playhead (~0.77s/s, params land
+where you'll never hear them) until the pod dies ~60-75s in. Evidence
+chain (verified against the DEMON backend source) says the staleness
+develops server-side between the pod's socket and `set_knobs` — see
+[docs/backend-playhead-lag-2026-06.md](docs/backend-playhead-lag-2026-06.md)
+for the escalation packet. Client-side this release adds:
+
+- **Server timing in `[health]`**: `tick=avg/max dec=max gens=N` read
+  from every slice's header — distinguishes "pod is slow" (huge tick)
+  from "pod has a stale playhead" (normal tick, late patches).
+- **Debug `[slice]` placement trace**: every ~10th slice logs
+  `start/pos/lead/tick/dec` — a failing session shows the lag curve
+  directly in the textport.
+- **`walk_window` default → true** (matches the deployed web client's
+  config.json AND the VST since 2026-06-09; fleet pods expect it for
+  >60s sources — backend-gated no-op below `walk_window_s`).
+- **VST-parity raw keys**: `steps_override` + `method` now ride the
+  params stream (seeded at ready from the Steps/SDE Init pars).
+- The pod-crash close signature (`SSLError [SYS]` mid-write) now maps
+  to a clear Status message ("connection reset by server — pod likely
+  crashed or was evicted") instead of looking like a client SSL bug.
+
+Tests: 209 (up from 181). Out of scope, tracked for later: dcw_* /
 rcfg / guidance knob parity (predates the deploy; server defaults
 apply).
 

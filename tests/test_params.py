@@ -80,3 +80,11 @@ def test_vae_window_default_matches_canonical_web_client():
     p = P.PARAM_BY_NAME["Vaewindow"]
     assert p.default == 0.36
     assert p.min is not None and p.min <= 0.36
+
+
+def test_walk_window_default_matches_canonical_clients():
+    """The deployed web client (public/config.json) and the VST (since
+    2026-06-09) both send walk_window=true — fleet pods expect it for
+    >60s sources. No effect for shorter sources (backend-gated)."""
+    p = P.PARAM_BY_NAME["Walkwindow"]
+    assert p.default is True
