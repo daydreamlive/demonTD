@@ -61,3 +61,23 @@ def test_lora_catalog_captures_trigger_word():
     assert "primary_trigger_word" in body, (
         "_apply_lora_catalog doesn't capture metadata.primary_trigger_word "
         "— the trigger column is dead and SendPrompt has nothing to inject")
+
+
+def test_build_tox_ships_every_module_demon_ext_imports():
+    """Inside TD, demon_ext resolves siblings via mod('<name>'), which
+    only works for modules build_tox.py synced into Text DATs. A module
+    imported here but missing from SRC_FILES compiles fine in pytest and
+    then fails to build the .tox (tdError: Could not find specified
+    module) — the session_config/events/contract_check miss."""
+    build_src = (Path(__file__).resolve().parent.parent / "build"
+                 / "build_tox.py").read_text()
+    m = re.search(r"SRC_FILES\s*=\s*\[([^\]]+)\]", build_src)
+    assert m, "SRC_FILES list not found in build/build_tox.py"
+    shipped = set(re.findall(r'"(\w+)\.py"', m.group(1)))
+
+    imported = set(re.findall(r"_mod\('(\w+)'\)", SRC))
+    missing = imported - shipped
+    assert not missing, (
+        f"demon_ext.py imports modules build_tox.py never syncs into the "
+        f".tox: {sorted(missing)} — add them to SRC_FILES (and the "
+        f"sys.modules invalidation list) in build/build_tox.py")
