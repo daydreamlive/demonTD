@@ -20,7 +20,9 @@ from pathlib import Path
 
 import pytest
 
+import events
 import params as P
+import session_config
 import wire
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -31,14 +33,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # uploads (documented per-command as `binary`, not a command itself).
 NON_MESSAGE_ENCODERS = {"config", "audio_frame"}
 
-# SessionConfig keys demonTD computes at Connect() time rather than
-# reading from an Init par (see _build_session_config in demon_ext.py).
-# Phase 2 replaces this list with the pure session-config builder's
-# actual emitted keys.
-COMPUTED_CONFIG_FIELDS = {
-    "enabled_loras", "lora_strengths", "prompt_b", "client_id",
-    "use_server_fixture",
-}
+
+def _emitted_config_keys() -> set[str]:
+    """The keys demonTD actually sends in SessionConfig — from the real
+    builder, with every conditional field forced on (no zstd ->
+    `compression`, device_id set -> `client_id`)."""
+    return set(session_config.build_session_config(
+        {}, enabled_loras=[], lora_strengths={}, prompt_b="",
+        device_id="test-device", zstd_available=False))
 
 
 # ---------------------------------------------------------------------------
@@ -89,11 +91,11 @@ def _num_eq(a, b) -> bool:
 def test_whitelist_hygiene(contract, whitelist):
     problems: list[str] = []
     cmds = contract["protocol"]["commands"]
-    events = contract["protocol"]["events"]
+    contract_events = contract["protocol"]["events"]
     cfg = contract["protocol"]["config"]
     knobs = _all_knobs(contract)
-    encoders = _encoder_names()
     streamed = _td_streamed_params()
+    emitted_cfg = _emitted_config_keys()
 
     def _rationales(section: str):
         for key, why in whitelist.get(section, {}).items():
@@ -119,10 +121,14 @@ def test_whitelist_hygiene(contract, whitelist):
                 f"gap closed, delete the entry")
 
     for name in whitelist.get("events_ignored", {}):
-        if name not in events:
+        if name not in contract_events:
             problems.append(
                 f"events_ignored.{name}: not a contract event any more — "
                 f"stale entry, delete it")
+        if name in events.EVENT_HANDLERS:
+            problems.append(
+                f"events_ignored.{name}: events.EVENT_HANDLERS handles it — "
+                f"the gap closed, delete the entry")
 
     for name in whitelist.get("handshake_not_implemented", {}):
         if name not in contract["protocol"]["handshake"]["commands"]:
@@ -135,7 +141,7 @@ def test_whitelist_hygiene(contract, whitelist):
             problems.append(
                 f"config_fields_not_sent.{name}: not a contract config "
                 f"field any more — stale entry, delete it")
-        if name in _td_init_params() or name in COMPUTED_CONFIG_FIELDS:
+        if name in emitted_cfg:
             problems.append(
                 f"config_fields_not_sent.{name}: demonTD DOES send this — "
                 f"the gap closed, delete the entry")
@@ -458,19 +464,40 @@ def test_menu_options_match_enum(contract, whitelist):
 
 def test_session_config_field_parity(contract, whitelist):
     cfg = set(contract["protocol"]["config"])
-    sent = set(_td_init_params()) | COMPUTED_CONFIG_FIELDS
+    sent = _emitted_config_keys()
 
     not_sent = cfg - sent - set(whitelist["config_fields_not_sent"])
     assert not not_sent, (
         f"contract config fields demonTD never sends (and no whitelist "
         f"entry): {sorted(not_sent)} — new SessionConfig fields; wire them "
-        f"into _build_session_config or whitelist with a rationale")
+        f"into session_config.build_session_config or whitelist with a "
+        f"rationale")
 
     extra = sent - cfg - set(whitelist["config_fields_extra"])
     assert not extra, (
         f"demonTD sends config keys the contract doesn't list: "
         f"{sorted(extra)} — the server dropped them; stop sending or "
         f"whitelist in config_fields_extra")
+
+
+def test_event_dispatch_parity(contract, whitelist):
+    """events.EVENT_HANDLERS ∪ events_ignored == the contract's event
+    set, both directions — the command_failed-with-no-handler class of
+    bug, and its inverse (a handler for an event the server dropped)."""
+    handled = set(events.EVENT_HANDLERS)
+    contract_events = set(contract["protocol"]["events"])
+    ignored = set(whitelist["events_ignored"])
+
+    missing = contract_events - handled - ignored
+    assert not missing, (
+        f"server events with no handler in events.EVENT_HANDLERS and no "
+        f"whitelist entry: {sorted(missing)} — add an _ev_* handler or "
+        f"whitelist in events_ignored with a rationale")
+
+    extra = handled - contract_events
+    assert not extra, (
+        f"events.EVENT_HANDLERS handles events the server no longer "
+        f"emits: {sorted(extra)} — remove the dead handlers")
 
 
 def test_session_config_defaults(contract, whitelist):

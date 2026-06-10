@@ -252,6 +252,8 @@ try:
     queue_worker_mod = _mod('queue_worker')
     params_pacer_mod = _mod('params_pacer')
     binary_router_mod = _mod('binary_router')
+    session_config_mod = _mod('session_config')
+    events_mod = _mod('events')
 except NameError:
     import params as P  # type: ignore
     import wire  # type: ignore
@@ -264,6 +266,8 @@ except NameError:
     import queue_worker as queue_worker_mod  # type: ignore
     import params_pacer as params_pacer_mod  # type: ignore
     import binary_router as binary_router_mod  # type: ignore
+    import session_config as session_config_mod  # type: ignore
+    import events as events_mod  # type: ignore
 
 
 # Scheduled-curve helpers. Module-level so they're testable without TD
@@ -2813,74 +2817,23 @@ class DemonExt:
     def _build_session_config(self) -> dict[str, Any]:
         """Build the SessionConfig JSON to send right after WS open.
 
-        Matches demon-public-demo's useStartSession.ts buildConfig() exactly,
-        in the same field order. Sends all 13 fields every time (the JS
-        client does too); the server type allows extras but we don't add
-        any to minimize chance of a strict-parser rejection.
+        The field set, ordering, and fallback defaults live in
+        `session_config.build_session_config` (pure, contract-tested
+        against the vendored DEMON contract); this wrapper just gathers
+        the live par values and session state.
         """
-        def init_val(td_name: str, default: Any) -> Any:
-            return self._read_par(td_name, default)
-
-        # Fallback defaults below match demon-public-demo's
-        # useStartSession.ts buildConfig() — only used if the par read
-        # somehow fails (par missing, type error, etc.).
-        cfg: dict[str, Any] = {
-            "sde":          bool(init_val("Sde", False)),
-            "lora":         bool(init_val("Lora", True)),
-            "depth":        int(init_val("Depth", 4)),
-            "vae_window":   float(init_val("Vaewindow", 6.0)),
-            "crop":         float(init_val("Crop", 0.0)),
-            "steps":        int(init_val("Steps", 8)),
-            "fast_vae":     bool(init_val("Fastvae", False)),
-            "walk_window":  bool(init_val("Walkwindow", False)),
-            "walk_window_s": float(init_val("Walkwindows", 60.0)),
-            "enabled_loras": self._enabled_loras(),
-            "prompt":       str(init_val("Initprompt",
-                "heavy dubstep, deathstep, afxdump, growl heavy bass distortion")),
-            # Secondary prompt for A/B blending. The Promptblend continuous
-            # param interpolates between `prompt` (A) and `prompt_b` (B).
-            # Empty string = no B side, equivalent to always-A. We source
-            # `prompt_b` from the LIVE `Promptb` par on the Prompt+LoRA
-            # page so it tracks whatever the user has typed at session
-            # start — one source of truth, editable mid-session via
-            # SendPrompt (matches demon-public-demo's `prompt_b: perf.promptB`).
-            "prompt_b":     str(init_val("Promptb", "") or ""),
-            "lora_strengths": self._lora_strengths(),
-            "fixture_name": str(init_val("Fixturename", "")),
-            # Playback-lead tuning (server-side decode buffer). Optional in
-            # the protocol ("omit to use server default") but the web client
-            # sends them from its config.json defaults, so we do too for
-            # parity. Sourced from the Init-page Lead* pars.
-            "lead_floor_s":   float(init_val("Leadfloor", 0.25)),
-            "lead_ceiling_s": float(init_val("Leadceiling", 1.35)),
-            "lead_release_tau_s": float(init_val("Leadreleasetau", 1.5)),
-            # Capability gate — when True the server loads the fixture from
-            # its own /fixtures cache and the client skips the audio frame
-            # upload. The JS client capability-probes via /api/server-info
-            # before flipping this to True; we send False unconditionally
-            # so the unchanged upload path is used. Sending the field
-            # explicitly (vs omitting) makes our intent clear to log
-            # readers and keeps demon-public-demo + demonTD on the same
-            # SessionConfig surface.
-            "use_server_fixture": False,
-            # Per-machine identifier the server stashes into loguru contextvars
-            # so every pod-side log record on this WS carries it. Makes it
-            # possible to grep pod logs by demonTD instance when triaging.
-            # demon-public-demo uses PostHog's distinct_id; we reuse the
-            # deviceId we already generated for hosted-mode queue joins.
-            # `or None` makes encode_config drop the field on the wire when
-            # _load_auth somehow didn't populate it.
-            "client_id":    self._device_id or None,
+        par_values = {
+            td_name: self._read_par(td_name, P.PARAM_BY_NAME[td_name].default)
+            for td_name in session_config_mod.par_names().values()
         }
-        # If we don't have a working zstd decompressor (TD's bundled Python
-        # can't load our vendored zstandard binary, etc.), ask the server
-        # to emit raw float16 slices instead. Without this, every slice
-        # would land with flags=SLICE_FLAG_DELTA and be rejected by
-        # decode_slice → no generated audio plays. Trade-off is ~1.5×
-        # more bandwidth on the receive path.
-        if _ZSTD_DEC is None:
-            cfg["compression"] = "none"
-        return cfg
+        return session_config_mod.build_session_config(
+            par_values,
+            enabled_loras=self._enabled_loras(),
+            lora_strengths=self._lora_strengths(),
+            prompt_b=str(self._read_par("Promptb", "") or ""),
+            device_id=self._device_id,
+            zstd_available=_ZSTD_DEC is not None,
+        )
 
     @staticmethod
     def _lora_par_safe(lid: str) -> str:
@@ -2952,104 +2905,148 @@ class DemonExt:
             return
 
         kind = data.get("type", "")
-        if kind == "ready":
-            self.log(f"server ready: ch={data.get('channels')} sr={data.get('sample_rate')}")
-            # NOTE: the expecting-initial-buffer flag lives in the
-            # BinaryRouter now, set by recv-thread text sniffing
-            # (_on_ws_text → router.sniff_text) — by the time we drain
-            # this event, the recv thread may already have processed the
-            # initial buffer. Nothing binary-routing-related here.
-            cat = data.get("lora_catalog") or []
-            self._apply_lora_catalog(cat)
-            self._seed_dirty_from_current_pars()
-            # Pod made it past handshake — failover path is no longer
-            # eligible. Reset the failover counters so a future
-            # close-after-ready is treated as a genuine disconnect
-            # (not "let's try another pod"), and drop _pending_audio
-            # since the server has it now. (We hold it across the WS
-            # cycle so failover retries can re-send without resolving
-            # PCM again — but once we've successfully reached `ready`
-            # there's no reason to keep it around.)
-            self._saw_ready = True
-            self._failover_attempts = 0
-            self._pending_audio = None
-            self._pending_audio_samples = 0
-            # Re-push the per-path interpolation methods so the server
-            # matches the menus even after a (re)connect. Mirrors the web
-            # client's useInterpSync, which sends the full set on every
-            # transition into "ready".
-            self._push_interp_methods()
-        elif kind == "lora_catalog":
-            self._apply_lora_catalog(data.get("catalog") or [])
-        elif kind == "params_update":
-            # Server-echoed param values; could be displayed but we don't overwrite UI.
-            pass
-        elif kind == "prompt_applied":
-            self.log(f"prompt applied: {data.get('tags')}")
-        elif kind == "swap_ready":
-            # Logging only. The ring clear + expecting-initial flag now
-            # happen in the BinaryRouter's recv-thread sniffer — a clear
-            # HERE could land AFTER the recv thread already init'd the
-            # NEW track's loop and wipe it (main-thread drain lags the
-            # recv thread by design).
-            self.log(f"swap_ready ch={data.get('channels')}")
-        elif kind in ("timbre_set", "timbre_cleared", "structure_set",
-                      "structure_cleared"):
-            self.log(kind)
-        elif kind in ("timbre_failed", "structure_failed", "swap_failed", "error"):
-            self.log(f"server {kind}: {data.get('error') or data.get('message')}")
-            self._set_status(f"Error: {kind}")
-        elif kind in ("stem_assets", "stem_ready"):
-            # Server's stem-separation feature. Two big binary blobs
-            # follow (~13 MB each, flag bits we don't decode). The skip
-            # counter lives in the BinaryRouter (recv-thread sniffer);
-            # this is informational only.
+        # Dispatch table lives in events.py (EVENT_HANDLERS) so
+        # tests/test_contract.py can hold it against the vendored DEMON
+        # contract's event set without parsing this file.
+        handler = self._event_dispatch().get(kind)
+        if handler is not None:
+            handler(kind, data)
+            return
+        # Unrecognized message types — known-unknowns the server may
+        # emit but we don't yet handle. Logged once per kind so the
+        # textport doesn't spam.
+        seen = getattr(self, "_unknown_kinds_seen", set())
+        if kind not in seen:
+            self.log(f"unknown server message: {kind}")
+            seen.add(kind)
+            self._unknown_kinds_seen = seen
+
+    def _event_dispatch(self) -> dict[str, Any]:
+        """Bound-method dispatch for EVENT_HANDLERS, built lazily (the
+        extension __init__ predates some handler refactors in saved
+        .toxes, so don't rely on __init__ having run a builder)."""
+        d = getattr(self, "_evt_dispatch", None)
+        if d is None:
+            d = {kind: getattr(self, meth)
+                 for kind, meth in events_mod.EVENT_HANDLERS.items()}
+            self._evt_dispatch = d
+        return d
+
+    def _ev_ready(self, kind: str, data: dict) -> None:
+        self.log(f"server ready: ch={data.get('channels')} sr={data.get('sample_rate')}")
+        # NOTE: the expecting-initial-buffer flag lives in the
+        # BinaryRouter now, set by recv-thread text sniffing
+        # (_on_ws_text → router.sniff_text) — by the time we drain
+        # this event, the recv thread may already have processed the
+        # initial buffer. Nothing binary-routing-related here.
+        cat = data.get("lora_catalog") or []
+        self._apply_lora_catalog(cat)
+        self._seed_dirty_from_current_pars()
+        # Pod made it past handshake — failover path is no longer
+        # eligible. Reset the failover counters so a future
+        # close-after-ready is treated as a genuine disconnect
+        # (not "let's try another pod"), and drop _pending_audio
+        # since the server has it now. (We hold it across the WS
+        # cycle so failover retries can re-send without resolving
+        # PCM again — but once we've successfully reached `ready`
+        # there's no reason to keep it around.)
+        self._saw_ready = True
+        self._failover_attempts = 0
+        self._pending_audio = None
+        self._pending_audio_samples = 0
+        # Re-push the per-path interpolation methods so the server
+        # matches the menus even after a (re)connect. Mirrors the web
+        # client's useInterpSync, which sends the full set on every
+        # transition into "ready".
+        self._push_interp_methods()
+
+    def _ev_lora_catalog(self, kind: str, data: dict) -> None:
+        self._apply_lora_catalog(data.get("catalog") or [])
+
+    def _ev_params_update(self, kind: str, data: dict) -> None:
+        # Server-echoed param values; could be displayed but we don't
+        # overwrite UI.
+        pass
+
+    def _ev_prompt_applied(self, kind: str, data: dict) -> None:
+        self.log(f"prompt applied: {data.get('tags')}")
+
+    def _ev_swap_ready(self, kind: str, data: dict) -> None:
+        # Logging only. The ring clear + expecting-initial flag now
+        # happen in the BinaryRouter's recv-thread sniffer — a clear
+        # HERE could land AFTER the recv thread already init'd the
+        # NEW track's loop and wipe it (main-thread drain lags the
+        # recv thread by design).
+        self.log(f"swap_ready ch={data.get('channels')}")
+
+    def _ev_log_kind(self, kind: str, data: dict) -> None:
+        # timbre_set / timbre_cleared / structure_set / structure_cleared:
+        # acks with no payload TD acts on.
+        self.log(kind)
+
+    def _ev_server_error(self, kind: str, data: dict) -> None:
+        # timbre_failed / structure_failed / swap_failed / error.
+        self.log(f"server {kind}: {data.get('error') or data.get('message')}")
+        self._set_status(f"Error: {kind}")
+
+    def _ev_command_failed(self, kind: str, data: dict) -> None:
+        # A `requires`-tagged command was rejected because the session's
+        # backend lacks the capability (loud failure, never a silent
+        # no-op) — e.g. a LoRA command on a lora-disabled session. The
+        # command was NOT applied; tell the user which one and why.
+        cmd = data.get("command") or "?"
+        err = data.get("error") or "(no reason)"
+        req = data.get("requires")
+        extra = f" (requires {req})" if req else ""
+        self.log(f"server rejected {cmd}: {err}{extra}")
+        self._set_status(f"Error: {cmd} rejected by server")
+
+    def _ev_stem_assets(self, kind: str, data: dict) -> None:
+        # Server's stem-separation feature. Two big binary blobs
+        # follow (~13 MB each, flag bits we don't decode). The skip
+        # counter lives in the BinaryRouter (recv-thread sniffer);
+        # this is informational only.
+        if self._debug_enabled:
+            self.log(f"stem_assets (router skipping "
+                     f"{int(data.get('count', 2) or 2)} blobs)")
+
+    def _ev_stem_failed(self, kind: str, data: dict) -> None:
+        # Server-side stem extraction failed for an uploaded track.
+        # Since we don't have a stems UI, this is informational only —
+        # log it visibly so it doesn't hide behind the unknown-kind
+        # dedupe.
+        err = data.get("error") or "(no reason)"
+        fixture = data.get("fixture_name") or "(unknown)"
+        self.log(f"server stem_failed: fixture={fixture} error={err}")
+
+    def _ev_depth_applied(self, kind: str, data: dict) -> None:
+        # Server ack of a set_depth request, carrying the actually-
+        # applied (server-side-clamped) value. We don't send set_depth
+        # from TD yet — depth is Init-only — so we'd only see this
+        # echo if an MCP client tweaked depth on a shared session.
+        # Log for visibility; no par to update.
+        self.log(f"server depth_applied: value={data.get('value')}")
+
+    def _ev_params_echo(self, kind: str, data: dict) -> None:
+        # MCP-driven param updates. The server emits these when a
+        # control bus (not the browser/TD) changes continuous params,
+        # so the UI can mirror them. TD has no MCP integration today,
+        # so this is decorative — log under Debug only.
+        if self._debug_enabled:
+            raw = data.get("raw") or {}
+            self.log(f"params_echo: {len(raw)} key(s) mirrored from MCP")
+
+    def _ev_prompt_blend_echo(self, kind: str, data: dict) -> None:
+        # MCP-driven prompt_blend slider update. Mirror back into the
+        # `Promptblend` continuous par so the TD UI reflects whatever
+        # an external control bus set. Cheap and useful.
+        try:
+            value = float(data.get("value", 0.0))
+            self._write_par("Promptblend", max(0.0, min(1.0, value)))
             if self._debug_enabled:
-                self.log(f"stem_assets (router skipping "
-                         f"{int(data.get('count', 2) or 2)} blobs)")
-        elif kind == "stem_failed":
-            # Server-side stem extraction failed for an uploaded track.
-            # Since we don't have a stems UI, this is informational only —
-            # log it visibly so it doesn't hide behind the unknown-kind
-            # dedupe.
-            err = data.get("error") or "(no reason)"
-            fixture = data.get("fixture_name") or "(unknown)"
-            self.log(f"server stem_failed: fixture={fixture} error={err}")
-        elif kind == "depth_applied":
-            # Server ack of a set_depth request, carrying the actually-
-            # applied (server-side-clamped) value. We don't send set_depth
-            # from TD yet — depth is Init-only — so we'd only see this
-            # echo if an MCP client tweaked depth on a shared session.
-            # Log for visibility; no par to update.
-            self.log(f"server depth_applied: value={data.get('value')}")
-        elif kind == "params_echo":
-            # MCP-driven param updates. The server emits these when a
-            # control bus (not the browser/TD) changes continuous params,
-            # so the UI can mirror them. TD has no MCP integration today,
-            # so this is decorative — log under Debug only.
-            if self._debug_enabled:
-                raw = data.get("raw") or {}
-                self.log(f"params_echo: {len(raw)} key(s) mirrored from MCP")
-        elif kind == "prompt_blend_echo":
-            # MCP-driven prompt_blend slider update. Mirror back into the
-            # `Promptblend` continuous par so the TD UI reflects whatever
-            # an external control bus set. Cheap and useful.
-            try:
-                value = float(data.get("value", 0.0))
-                self._write_par("Promptblend", max(0.0, min(1.0, value)))
-                if self._debug_enabled:
-                    self.log(f"prompt_blend_echo: mirrored value={value}")
-            except Exception as e:
-                self.log(f"prompt_blend_echo apply failed: {e}")
-        else:
-            # Other unrecognized message types — known-unknowns the server
-            # may emit but we don't yet handle. Logged once per kind so
-            # the textport doesn't spam.
-            seen = getattr(self, "_unknown_kinds_seen", set())
-            if kind not in seen:
-                self.log(f"unknown server message: {kind}")
-                seen.add(kind)
-                self._unknown_kinds_seen = seen
+                self.log(f"prompt_blend_echo: mirrored value={value}")
+        except Exception as e:
+            self.log(f"prompt_blend_echo apply failed: {e}")
 
     def _dump_wav(self, path: str, pcm: np.ndarray, channels: int,
                   sample_rate: int = 48000) -> None:
