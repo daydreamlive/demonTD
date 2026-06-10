@@ -14,11 +14,9 @@ cook, a UI interaction, a file dialog — silenced it for the duration.
 A >250 ms hitch ate the entire server lead: slices landed behind the
 playhead and the loop played stale content (audible chop).
 
-The pacer is a daemon thread on an ~8 ms cadence — the web client's
-TICK_MS exactly (the server is built for 125 msg/s per client). Under
-GIL pressure from TD's main thread the effective period stretches, so
-starting from 8 ms also keeps the real-world cadence closer to the
-web client's than the earlier 16 ms did.
+The pacer is a daemon thread on a ~16 ms cadence (the web client sends
+every 8 ms; frame-rate used to give us ~16 ms — we keep that, now
+immune to main-thread stalls).
 
 Threading contract
 ------------------
@@ -51,7 +49,7 @@ class ParamsPacer:
         build_message: Callable[[], str | None],
         send: Callable[[str], bool],
         stats=None,
-        interval_s: float = 0.008,
+        interval_s: float = 0.016,
         log: Callable[[str], None] = print,
     ):
         self._build_message = build_message

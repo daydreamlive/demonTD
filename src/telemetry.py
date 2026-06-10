@@ -67,17 +67,6 @@ class SmoothnessStats:
         self.hb_last_ms = 0.0
         self.hb_max_ms = 0.0
         self.hb_fail_count = 0
-        # Server-side generation timing, read from slice headers
-        # (tick_ms = pod per-iteration wall time, dec_ms = decoder pass,
-        # num_gens = generation counter). The decisive discriminator for
-        # "slices land in the wrong place": normal tick_ms while patches
-        # run late = the pod generates FINE but at a stale playhead
-        # (intake/clock problem); huge tick_ms = the pod itself is slow.
-        self.tick_ms_sum = 0.0
-        self.tick_ms_max = 0.0
-        self.tick_ms_n = 0
-        self.dec_ms_max = 0.0
-        self.num_gens_last = 0
 
     # -- producers (any thread) --------------------------------------------
 
@@ -110,19 +99,6 @@ class SmoothnessStats:
         if not ok:
             self.hb_fail_count += 1
 
-    def note_slice_timing(self, tick_ms: float, dec_ms: float,
-                          num_gens: int) -> None:
-        """Server-side timing carried in every slice's 23-byte header."""
-        if tick_ms > 0.0:
-            self.tick_ms_sum += tick_ms
-            self.tick_ms_n += 1
-            if tick_ms > self.tick_ms_max:
-                self.tick_ms_max = tick_ms
-        if dec_ms > self.dec_ms_max:
-            self.dec_ms_max = dec_ms
-        if num_gens:
-            self.num_gens_last = num_gens
-
     # -- consumer (main thread) --------------------------------------------
 
     def drain(self) -> dict:
@@ -140,11 +116,6 @@ class SmoothnessStats:
             "hb_last_ms": self.hb_last_ms,
             "hb_max_ms": self.hb_max_ms,
             "hb_fails": self.hb_fail_count,
-            "tick_ms_avg": (self.tick_ms_sum / self.tick_ms_n
-                            if self.tick_ms_n else 0.0),
-            "tick_ms_max": self.tick_ms_max,
-            "dec_ms_max": self.dec_ms_max,
-            "num_gens": self.num_gens_last,
         }
         self.reset()
         return snap
@@ -159,10 +130,6 @@ class SmoothnessStats:
             f"(gap_max={snap['params_gap_max_ms']:.0f}ms)  "
             f"patches={snap['patches']} "
             f"late={snap['patches_late']} lead_min={lead_str}  "
-            f"tick={snap.get('tick_ms_avg', 0.0):.0f}/"
-            f"{snap.get('tick_ms_max', 0.0):.0f}ms "
-            f"dec={snap.get('dec_ms_max', 0.0):.0f}ms "
-            f"gens={snap.get('num_gens', 0)}  "
             f"drain_gap_max={snap['drain_gap_max_ms']:.0f}ms  "
             f"hb={snap['hb_last_ms']:.0f}ms"
             f"(max={snap['hb_max_ms']:.0f} fails={snap['hb_fails']})  "

@@ -45,16 +45,10 @@ import websocket  # type: ignore[import-not-found]
 
 
 class WSClient:
-    # Socket timeout for the recv loop. The recv thread is the ONLY
-    # thread that touches the socket, so queued outbound sends can only
-    # go out when recv() returns — either on inbound data or on this
-    # timeout. At the old 0.1 s, a params message enqueued while the
-    # socket was quiet sat in the queue for up to 100 ms (avg ~50 ms)
-    # of pure queueing latency on EVERY knob turn. 0.01 s caps that at
-    # ~10 ms; the cost is ~100 cheap wakeups/s (a queue.Empty check) on
-    # a daemon thread. Large sends temporarily raise the timeout (see
+    # Socket timeout for the recv loop. Short so the loop wakes ~10×/s to
+    # flush queued outbound sends; large sends temporarily raise it (see
     # _flush_outbound).
-    _RECV_TIMEOUT = 0.01
+    _RECV_TIMEOUT = 0.1
 
     def __init__(
         self,
@@ -156,10 +150,10 @@ class WSClient:
             except Exception as e:
                 self._log(f"[ws_client] on_open raised: {e}")
 
-        # Short socket timeout so the loop wakes ~100×/s to flush queued
-        # outbound sends (params keepalive etc.) promptly. All socket
-        # I/O — both recv AND send — happens ONLY on this thread, so the
-        # SSLSocket is never read and written concurrently.
+        # Short socket timeout so the loop wakes ~10×/s to flush queued
+        # outbound sends (params keepalive etc.). All socket I/O — both
+        # recv AND send — happens ONLY on this thread, so the SSLSocket is
+        # never read and written concurrently.
         try:
             self._ws.settimeout(self._RECV_TIMEOUT)
         except Exception:

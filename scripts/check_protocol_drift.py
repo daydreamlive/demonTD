@@ -222,74 +222,6 @@ def parse_ts_protocol(types_protocol_ts: str,
 
 
 # ---------------------------------------------------------------------------
-# Generated wire-contract parser (post-2026-06 SDK layout)
-# ---------------------------------------------------------------------------
-# The 2026-06 demon-ui SDK refactor moved the protocol types into a
-# GENERATED file, vendor/demon-ui/sdk/types/wireContract.gen.ts, where
-# commands and events are declared side by side. The legacy regexes are
-# actively WRONG against it: TS_TYPE_LITERAL_RE picks up the `type:`
-# literal of every command payload interface too, poisoning server_types
-# and zeroing client_types via the `client_types -= server_types`
-# subtraction — a silent false-green. So when the gen file is present we
-# parse its explicit name arrays and OVERRIDE the type sets; constants /
-# slice flags still come from sdk/types/protocol.ts and the client-send
-# cross-check still parses sdk/protocol.ts (both verified to work with
-# the legacy regexes).
-
-def _extract_ts_name_array(src: str, const_name: str) -> list[str]:
-    """`export const NAME: ... = [ "a", "b", ... ]` → ["a", "b", ...]."""
-    m = re.search(const_name + r'[^=]*=\s*\[([^\]]*)\]', src, re.DOTALL)
-    if not m:
-        return []
-    return re.findall(r'"(\w+)"', m.group(1))
-
-
-def _extract_ts_union(src: str, type_name: str) -> list[str]:
-    """`export type Name = | "a" | "b";` → ["a", "b"]."""
-    m = re.search(r'export\s+type\s+' + type_name + r'\s*=\s*([^;]+);',
-                  src, re.DOTALL)
-    if not m:
-        return []
-    return re.findall(r'"(\w+)"', m.group(1))
-
-
-def parse_wire_contract(wire_contract_ts: str) -> dict | None:
-    """Parse sdk/types/wireContract.gen.ts. Returns None when the file is
-    absent/unparseable (pre-SDK refs) — callers then keep the legacy
-    regex results."""
-    if not wire_contract_ts:
-        return None
-    src = _strip_line_comments(wire_contract_ts)
-    events = _extract_ts_name_array(src, "EVENT_NAMES")
-    commands = _extract_ts_name_array(src, "COMMAND_NAMES")
-    if not events or not commands:
-        return None
-    # Init-phase upload handshake names live in separate unions.
-    hs_commands = _extract_ts_union(src, "HandshakeCommandName")
-    hs_events = _extract_ts_union(src, "HandshakeEventName")
-
-    session_fields: set[str] = set()
-    m = re.search(r'interface\s+SessionConfigPayload\s*\{([^}]+)\}',
-                  src, re.DOTALL)
-    if m:
-        for line in m.group(1).splitlines():
-            stripped = line.lstrip()
-            if (stripped.startswith("*") or stripped.startswith("//")
-                    or stripped.startswith("/*")):
-                continue
-            for field in TS_FIELD_NAME_RE.findall(line):
-                if field.startswith("["):
-                    continue
-                session_fields.add(field)
-
-    return {
-        "server_types": set(events) | set(hs_events),
-        "client_types": set(commands) | set(hs_commands),
-        "session_fields": session_fields,
-    }
-
-
-# ---------------------------------------------------------------------------
 # Python parsers (our local protocol surface)
 # ---------------------------------------------------------------------------
 
@@ -338,13 +270,7 @@ _TS_SESSION_FIELDS_INTENTIONALLY_OMITTED = {
     # the field is functionally equivalent to "no telemetry" and
     # matches every shipped release through v0.2.14. Pick up if/when
     # we wire client-side telemetry.
-    # (Absent from the post-2026-06 SessionConfigPayload but kept so
-    # legacy --ref runs against pre-SDK snapshots stay green.)
     "telemetry_version",
-    # Post-2026-06 SessionConfigPayload additions the JS client itself
-    # doesn't send unconditionally; server defaults are correct for TD.
-    "lora_paths",   # LoRA search-path override (server-side default)
-    "backend",      # backend identifier override
 }
 
 # Client-side `type` literals demonTD knowingly doesn't encode. These are
@@ -360,10 +286,6 @@ _TS_CLIENT_TYPES_INTENTIONALLY_OMITTED = {
     # exposed as a TD parameter. Add an encoder + Loopbandstart/end
     # pars to revisit.
     "loop_band",
-    # Init-phase upload handshake (post-2026-06). demonTD uses the
-    # legacy binary-frame upload (config JSON + raw PCM frame), which
-    # the server still accepts.
-    "upload_track",
 }
 
 # Server-emitted `type` literals demonTD doesn't dispatch on. These are
@@ -375,10 +297,6 @@ _TS_SERVER_TYPES_INTENTIONALLY_IGNORED = {
     # message that follows. Shipped every release through v0.2.14
     # without a handler with no ill effect.
     "init_ack",
-    # Replies to the upload_track handshake, which demonTD never sends
-    # (see upload_track in _TS_CLIENT_TYPES_INTENTIONALLY_OMITTED).
-    "upload_ok",
-    "upload_failed",
 }
 
 
@@ -883,68 +801,35 @@ def main() -> int:
     lora_triggers_src = (lora_triggers_path.read_text()
                          if lora_triggers_path.is_file() else "")
 
-    # Reference files, as CANDIDATE-PATH lists tried in order. The
-    # 2026-06 demon-ui SDK refactor moved the protocol sources from
-    # engine//types/ into sdk/ — new locations first, legacy fallbacks
-    # second so `--ref <old-sha>` comparisons still work. Missing ALL
-    # candidates for a required file is a loud exit-2 (a silent skip
-    # here is exactly how the SDK refactor shipped past this checker).
-    dpd_rel: dict[str, list[str]] = {
-        "types_protocol_ts": [
-            "vendor/demon-ui/sdk/types/protocol.ts",
-            "vendor/demon-ui/types/protocol.ts",
-        ],
-        "engine_protocol_ts": [
-            "vendor/demon-ui/sdk/protocol.ts",
-            "vendor/demon-ui/engine/protocol.ts",
-        ],
-        "audio_worklet_js": [
-            "public/audio-worklet.js",
-        ],
-        # Generated wire contract (post-SDK only). When present it
-        # OVERRIDES the message-type/session-field sets — the legacy
-        # regexes mis-parse the sdk layout (see parse_wire_contract).
-        "wire_contract_ts": [
-            "vendor/demon-ui/sdk/types/wireContract.gen.ts",
-        ],
+    dpd_rel = {
+        "types_protocol_ts":  "vendor/demon-ui/types/protocol.ts",
+        "engine_protocol_ts": "vendor/demon-ui/engine/protocol.ts",
+        "audio_worklet_js":   "public/audio-worklet.js",
         # Optional — used for the label-parity check. If the canonical
         # moves the LABEL_OVERRIDES table somewhere else, this becomes a
         # silent no-op (parse_ts_label_overrides handles ""), not a
         # hard failure.
-        "slider_tile_tsx": [
-            "vendor/demon-ui/components/Performance/SliderTile.tsx",
-        ],
+        "slider_tile_tsx":    "vendor/demon-ui/components/Performance/SliderTile.tsx",
     }
 
     # Optional reference files: missing → empty string, so the
-    # downstream parser silently no-ops instead of failing the whole
-    # run. wire_contract_ts is optional because pre-SDK refs don't have
-    # it (the legacy regex path covers those).
-    _OPTIONAL_DPD_FILES = {"slider_tile_tsx", "wire_contract_ts"}
-
-    resolved_paths: dict[str, str] = {}
+    # downstream parser silently no-ops instead of failing the whole run.
+    _OPTIONAL_DPD_FILES = {"slider_tile_tsx"}
 
     if args.worktree:
         # Legacy: read the reference straight from the working tree.
         dpd_sha = _git_short_sha(dpd_root)
         dpd_src: dict[str, str] = {}
-        for k, candidates in dpd_rel.items():
-            text = None
-            for rel in candidates:
-                try:
-                    text = (dpd_root / rel).read_text()
-                    resolved_paths[k] = rel
-                    break
-                except OSError:
-                    continue
-            if text is None:
+        for k, rel in dpd_rel.items():
+            try:
+                dpd_src[k] = (dpd_root / rel).read_text()
+            except OSError as e:
                 if k in _OPTIONAL_DPD_FILES:
                     dpd_src[k] = ""
                     continue
-                print(f"error: demon-public-demo working tree has none of "
-                      f"{candidates} ({k})", file=sys.stderr)
+                print(f"error: reading demon-public-demo working tree: {e}",
+                      file=sys.stderr)
                 return 2
-            dpd_src[k] = text
         # Loud warning if the working tree is behind the remote.
         if not args.no_fetch:
             _git_fetch(dpd_root)
@@ -967,27 +852,16 @@ def main() -> int:
                   f"--ref <branch> or --worktree.", file=sys.stderr)
             return 2
         dpd_src = {}
-        for k, candidates in dpd_rel.items():
-            text = None
-            last_err: Exception | None = None
-            for rel in candidates:
-                try:
-                    text = _read_ref_file(dpd_root, args.ref, rel)
-                    resolved_paths[k] = rel
-                    break
-                except subprocess.CalledProcessError as e:
-                    last_err = e
-                    continue
-            if text is None:
+        for k, rel in dpd_rel.items():
+            try:
+                dpd_src[k] = _read_ref_file(dpd_root, args.ref, rel)
+            except subprocess.CalledProcessError as e:
                 if k in _OPTIONAL_DPD_FILES:
                     dpd_src[k] = ""
                     continue
-                print(f"error: {args.ref} in demon-public-demo has none of "
-                      f"{candidates} ({k}): "
-                      f"{getattr(last_err, 'stderr', last_err)}",
-                      file=sys.stderr)
+                print(f"error: reading {args.ref} from demon-public-demo: "
+                      f"{e.stderr or e}", file=sys.stderr)
                 return 2
-            dpd_src[k] = text
         # Informational: note when the checkout differs from the compared ref.
         head_sha = _git_short_sha(dpd_root)
         if head_sha != dpd_sha:
@@ -995,31 +869,11 @@ def main() -> int:
                   f"checkout HEAD is {head_sha}. Reference read from the ref, "
                   f"not the working tree.", file=sys.stderr)
 
-    # Surface which candidate paths resolved — a future demo-repo file
-    # move should be diagnosable from this line, not from a silent
-    # behavior change.
-    print("reference files: "
-          + "  ".join(f"{k}={v}" for k, v in sorted(resolved_paths.items())),
-          file=sys.stderr)
-
     ts = parse_ts_protocol(
         dpd_src["types_protocol_ts"],
         dpd_src["engine_protocol_ts"],
         dpd_src["audio_worklet_js"],
     )
-    # Post-SDK refs: the generated wire contract is authoritative for
-    # message types + SessionConfig fields. The legacy regexes mis-parse
-    # the sdk layout (command/event payloads share one file → poisoned
-    # server_types, empty client_types) — override when available.
-    contract = parse_wire_contract(dpd_src.get("wire_contract_ts", ""))
-    if contract is not None:
-        ts["server_types"] = contract["server_types"]
-        ts["client_types"] = contract["client_types"]
-        ts["session_fields"] = contract["session_fields"]
-        print("reference contract: wireContract.gen.ts "
-              f"({len(contract['server_types'])} events, "
-              f"{len(contract['client_types'])} commands)",
-              file=sys.stderr)
     ts_label_overrides = parse_ts_label_overrides(
         dpd_src.get("slider_tile_tsx", "")
     )

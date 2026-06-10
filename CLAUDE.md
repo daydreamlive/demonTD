@@ -65,8 +65,7 @@ harmless (falls back to uncompressed slices); `websocket` missing is fatal.
   Timer CHOP works; if you add periodic work, drive it from `frame_exec`.
 - **The pod has no keepalive** — the only thing keeping its WS alive after
   `ready` is the continuous `params` stream. A dedicated **pacer thread**
-  (`src/params_pacer.py`, ~8 ms cadence — the web client's TICK_MS)
-  sends it — NOT the frame loop —
+  (`src/params_pacer.py`, ~16 ms cadence) sends it — NOT the frame loop —
   so TD main-thread hitches can't silence it (a >250 ms hitch used to eat
   the server's 0.25 s lead and chop the audio). It sends every tick, not
   just on change; an EMPTY params dict is still the keepalive, and it

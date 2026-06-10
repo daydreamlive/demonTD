@@ -71,20 +71,3 @@ def test_param_count_in_expected_ballpark():
     """Sanity check that the schema is roughly the size we claimed."""
     # 12 session + 11 init + ~6 prompt/lora + 24 synthesis + 10 rcfg/dcw + 5 curves + 10 sources
     assert 60 <= len(P.PARAMS) <= 120
-
-
-def test_vae_window_default_matches_canonical_web_client():
-    """Regression: vae_window=6.0 (vs the web client's 0.36) made param
-    changes apply with multi-second lag on the post-2026-06 backend —
-    the 'slow params' bug. The default and min must allow 0.36."""
-    p = P.PARAM_BY_NAME["Vaewindow"]
-    assert p.default == 0.36
-    assert p.min is not None and p.min <= 0.36
-
-
-def test_walk_window_default_matches_canonical_clients():
-    """The deployed web client (public/config.json) and the VST (since
-    2026-06-09) both send walk_window=true — fleet pods expect it for
-    >60s sources. No effect for shorter sources (backend-gated)."""
-    p = P.PARAM_BY_NAME["Walkwindow"]
-    assert p.default is True

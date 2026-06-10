@@ -179,14 +179,10 @@ INIT_PARAMS: list[Param] = [
     Param("Depth", "depth", "Init", "Int", "init", default=4,
           min=1, max=8, clamp_min=True, clamp_max=True, order=30,
           help="DiT pipeline depth (latency/quality tradeoff)."),
-    Param("Vaewindow", "vae_window", "Init", "Float", "init", default=0.36,
-          min=0.1, max=10.0, clamp_min=True, clamp_max=True, order=40,
-          label="VAE Window", help="VAE decoder rolling-regen window in "
-                                   "seconds. 0.36 matches demon-public-demo "
-                                   "(and the post-2026-06 backend). Larger "
-                                   "windows make param changes audibly SLOW "
-                                   "to apply — the old 6.0 default was the "
-                                   "'params take forever' bug."),
+    Param("Vaewindow", "vae_window", "Init", "Float", "init", default=6.0,
+          min=0.5, max=10.0, clamp_min=True, clamp_max=True, order=40,
+          label="VAE Window", help="VAE decoder sliding window in seconds. "
+                                   "Matches demon-public-demo default."),
     Param("Crop", "crop", "Init", "Float", "init", default=0.0,
           min=0.0, max=120.0, clamp_min=True, order=50,
           help="Crop input audio to N seconds (0 = no crop)."),
@@ -196,14 +192,8 @@ INIT_PARAMS: list[Param] = [
     Param("Fastvae", "fast_vae", "Init", "Toggle", "init", default=False, order=70,
           label="Fast VAE", help="Use dreamvae distilled decoder (TensorRT only). "
                                   "Off matches demon-public-demo default."),
-    Param("Walkwindow", "walk_window", "Init", "Toggle", "init", default=True, order=80,
-          label="Walk Window",
-          help="Route sources longer than Walk Window (s) through the 60s "
-               "DiT engine, swapping latents at boundaries. The deployed "
-               "web client and the VST both send True — fleet pods expect "
-               "it for long sources (off = the whole source is thrown at "
-               "the engine at once). No effect for sources shorter than "
-               "Walk Window (s)."),
+    Param("Walkwindow", "walk_window", "Init", "Toggle", "init", default=False, order=80,
+          label="Walk Window", help="For long sources, use 60s engine at boundaries."),
     Param("Walkwindows", "walk_window_s", "Init", "Float", "init", default=60.0,
           min=1.0, max=240.0, clamp_min=True, order=90,
           label="Walk Window (s)", help="Walk window duration in seconds."),
