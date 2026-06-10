@@ -2828,7 +2828,7 @@ class DemonExt:
             "sde":          bool(init_val("Sde", False)),
             "lora":         bool(init_val("Lora", True)),
             "depth":        int(init_val("Depth", 4)),
-            "vae_window":   float(init_val("Vaewindow", 6.0)),
+            "vae_window":   float(init_val("Vaewindow", 0.36)),
             "crop":         float(init_val("Crop", 0.0)),
             "steps":        int(init_val("Steps", 8)),
             "fast_vae":     bool(init_val("Fastvae", False)),
@@ -2880,6 +2880,17 @@ class DemonExt:
         # more bandwidth on the receive path.
         if _ZSTD_DEC is None:
             cfg["compression"] = "none"
+        # Saved .toe files keep whatever Vaewindow value the user last had
+        # — including the old 6.0 default that the post-2026-06 backend
+        # turns into multi-second param-application lag. Warn loudly so
+        # the "params are slow" failure mode is self-diagnosing.
+        if cfg["vae_window"] > 1.0:
+            self.log(
+                f"WARNING: vae_window={cfg['vae_window']:.2f}s is much "
+                f"larger than the canonical 0.36s — param changes will "
+                f"apply SLOWLY. Set the Init-page 'VAE Window' par to "
+                f"0.36 and reconnect."
+            )
         return cfg
 
     @staticmethod

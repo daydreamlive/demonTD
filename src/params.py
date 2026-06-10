@@ -179,10 +179,14 @@ INIT_PARAMS: list[Param] = [
     Param("Depth", "depth", "Init", "Int", "init", default=4,
           min=1, max=8, clamp_min=True, clamp_max=True, order=30,
           help="DiT pipeline depth (latency/quality tradeoff)."),
-    Param("Vaewindow", "vae_window", "Init", "Float", "init", default=6.0,
-          min=0.5, max=10.0, clamp_min=True, clamp_max=True, order=40,
-          label="VAE Window", help="VAE decoder sliding window in seconds. "
-                                   "Matches demon-public-demo default."),
+    Param("Vaewindow", "vae_window", "Init", "Float", "init", default=0.36,
+          min=0.1, max=10.0, clamp_min=True, clamp_max=True, order=40,
+          label="VAE Window", help="VAE decoder rolling-regen window in "
+                                   "seconds. 0.36 matches demon-public-demo "
+                                   "(and the post-2026-06 backend). Larger "
+                                   "windows make param changes audibly SLOW "
+                                   "to apply — the old 6.0 default was the "
+                                   "'params take forever' bug."),
     Param("Crop", "crop", "Init", "Float", "init", default=0.0,
           min=0.0, max=120.0, clamp_min=True, order=50,
           help="Crop input audio to N seconds (0 = no crop)."),
