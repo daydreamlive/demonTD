@@ -44,6 +44,20 @@ from typing import Callable
 import websocket  # type: ignore[import-not-found]
 
 
+def parse_close_frame(data: bytes | str) -> tuple[int | None, str]:
+    """Parse a raw WS close-frame payload into (code, reason).
+
+    RFC 6455 §5.5.1: an optional 2-byte big-endian status code followed
+    by optional UTF-8 reason text. Empty/short payload -> (None, "")."""
+    if isinstance(data, str):
+        data = data.encode("utf-8", errors="replace")
+    if not data or len(data) < 2:
+        return None, ""
+    code = int.from_bytes(data[:2], "big")
+    reason = data[2:].decode("utf-8", errors="replace").strip()
+    return code, reason
+
+
 class WSClient:
     # Socket timeout for the recv loop. Short so the loop wakes ~10×/s to
     # flush queued outbound sends; large sends temporarily raise it (see
@@ -212,13 +226,24 @@ class WSClient:
                         except Exception as e:
                             self._log(f"[ws_client] on_binary raised: {e}")
                 elif opcode == websocket.ABNF.OPCODE_CLOSE:
-                    close_reason = "server sent close"
+                    # The close frame payload carries the server's code +
+                    # reason (2-byte BE code, then UTF-8 text). Because we
+                    # recv with control_frame=False, websocket-client hands
+                    # the raw frame to US and never fills close_status_code
+                    # — parse it here or the pod's last words (e.g.
+                    # `1011 "TRT engine not built"`) are thrown away and
+                    # every server close logs as code=None.
+                    close_code, why = parse_close_frame(data)
+                    close_reason = (f"server sent close: {why}" if why
+                                    else "server sent close")
                     break
                 # Ping/Pong handled by recv_data's control_frame=False filter.
         finally:
             try:
                 if self._ws is not None:
-                    close_code = getattr(self._ws, "close_status_code", None)
+                    if close_code is None:
+                        close_code = getattr(self._ws, "close_status_code",
+                                             None)
                     self._ws.close(status=self._req_close_code)
             except Exception:
                 pass

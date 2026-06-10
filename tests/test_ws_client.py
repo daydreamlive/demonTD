@@ -154,3 +154,29 @@ def test_connect_ignored_while_thread_alive_preserves_closing_request():
     assert c._closing is True
     ev.set()
     t.join(timeout=2.0)
+
+
+# ---------------------------------------------------------------------------
+# Close-frame parsing (the pod's last words)
+# ---------------------------------------------------------------------------
+
+def test_parse_close_frame_code_and_reason():
+    payload = (1011).to_bytes(2, "big") + b"TRT engine not built"
+    assert wsc_mod.parse_close_frame(payload) == (
+        1011, "TRT engine not built")
+
+
+def test_parse_close_frame_code_only():
+    assert wsc_mod.parse_close_frame((1000).to_bytes(2, "big")) == (1000, "")
+
+
+def test_parse_close_frame_empty():
+    assert wsc_mod.parse_close_frame(b"") == (None, "")
+    assert wsc_mod.parse_close_frame(b"\x03") == (None, "")
+
+
+def test_parse_close_frame_bad_utf8_never_raises():
+    payload = (1011).to_bytes(2, "big") + b"\xff\xfe broken"
+    code, reason = wsc_mod.parse_close_frame(payload)
+    assert code == 1011
+    assert "broken" in reason
