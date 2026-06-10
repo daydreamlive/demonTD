@@ -2,23 +2,30 @@
 #
 # Pre-release gate.
 #
-# Runs the same drift check that CI runs, plus the local pytest suite.
-# Exits non-zero on any failure so you cannot accidentally tag a release
-# while protocol drift is outstanding.
+# 1. Contract freshness: vendor/demon_contract.json must match
+#    DEMON@origin/main (scripts/sync_contract.py --check fetches origin
+#    and re-extracts; reads the ref, never the working tree).
+# 2. pytest — includes tests/test_contract.py, which holds demonTD's
+#    real surface against that vendored contract.
+#
+# Exits non-zero on any failure so you cannot tag a release while the
+# contract is stale or parity is broken.
 #
 # Usage:
 #     bash scripts/release.sh
 #
-# Required: a sibling checkout of demon-public-demo at
-# ~/git/demon-public-demo. Override via DEMON_PUBLIC_DEMO env var.
+# Required: a checkout of daydreamlive/DEMON at ~/git/DEMON (override
+# via DEMON_REPO). The contract dumper needs an interpreter with numpy —
+# sync_contract.py auto-detects .venv-test/ (create with:
+#   python3 -m venv .venv-test && .venv-test/bin/pip install numpy pytest).
 
 set -euo pipefail
 
-DEMON_PUBLIC_DEMO="${DEMON_PUBLIC_DEMO:-$HOME/git/demon-public-demo}"
+DEMON_REPO="${DEMON_REPO:-$HOME/git/DEMON}"
 
-if [[ ! -d "$DEMON_PUBLIC_DEMO" ]]; then
-    echo "error: demon-public-demo not found at $DEMON_PUBLIC_DEMO" >&2
-    echo "       clone it first or set DEMON_PUBLIC_DEMO=/path/to/checkout" >&2
+if [[ ! -d "$DEMON_REPO" ]]; then
+    echo "error: DEMON checkout not found at $DEMON_REPO" >&2
+    echo "       clone daydreamlive/DEMON or set DEMON_REPO=/path/to/checkout" >&2
     exit 2
 fi
 
@@ -26,30 +33,21 @@ fi
 REPO_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
 cd "$REPO_ROOT"
 
-echo ">>> [1/3] Fetching latest demon-public-demo (origin)..."
-# Just fetch — do NOT `git pull` the checked-out branch. That checkout is
-# usually parked on a stale `claude/sync/*` branch, and pulling it (then
-# diffing the working tree) once hid 23 commits of real backend drift.
-# The drift checker reads the reference from `origin/main` directly, so a
-# plain fetch is all we need here.
-git -C "$DEMON_PUBLIC_DEMO" fetch --quiet origin || \
-    echo "    (fetch failed — drift check will use the local origin ref)"
+# Prefer the numpy-bearing test venv for both steps (the repo .venv's
+# numpy is known-broken on this machine; see memory/CLAUDE notes).
+PY="$REPO_ROOT/.venv-test/bin/python"
+[[ -x "$PY" ]] || PY=python3
+
+echo ">>> [1/2] Contract freshness check (vs DEMON origin/main)..."
+# --check fetches DEMON's origin itself and compares the committed
+# artifact against a fresh extraction. Exit 1 = stale: run
+#   $PY scripts/sync_contract.py --demon "$DEMON_REPO"
+# review the diff, fix or whitelist until pytest is green, commit both.
+"$PY" scripts/sync_contract.py --demon "$DEMON_REPO" --check
 
 echo
-echo ">>> [2/3] Running protocol drift check (vs origin/main)..."
-# The script defaults to --ref origin/main and self-fetches; it reads the
-# reference from that ref, never the working tree.
-python3 scripts/check_protocol_drift.py \
-    --demonTD . \
-    --demon-public-demo "$DEMON_PUBLIC_DEMO"
-
-echo
-echo ">>> [3/3] Running pytest..."
-if [[ -d tests ]]; then
-    PYTHONPATH=src python3 -m pytest tests/ -v
-else
-    echo "    (no tests/ directory — skipping)"
-fi
+echo ">>> [2/2] Running pytest (includes contract tests)..."
+PYTHONPATH=src "$PY" -m pytest tests/ -v
 
 echo
 echo "============================================================"
@@ -74,3 +72,7 @@ echo
 echo "  (We deliberately upload the .tox in a separate step. The v0.1.5"
 echo "  release initially shipped a stale .tox; this two-step protocol"
 echo "  prevents recurrence.)"
+echo
+echo "  Remember the bundle zip: the release must include demonTD-vX.Y.Z.zip"
+echo "  (.tox + vendor/ — which now carries demon_contract.json for the"
+echo "  runtime drift check)."

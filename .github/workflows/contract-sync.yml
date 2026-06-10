@@ -1,0 +1,262 @@
+name: Contract sync
+
+# Nightly: re-extract the wire contract + UI parity data from
+# daydreamlive/DEMON@main into vendor/demon_contract.json. If it changed,
+# run the contract tests, let a Claude agent draft the demonTD fix, and
+# open/update ONE rolling PR (branch contract-sync/auto) carrying the
+# contract diff + test results. If the agent fails or ANTHROPIC_API_KEY
+# is missing, the PR still opens with the failing-test report — drift
+# detection degrades, it never goes silent.
+#
+# If the sync itself fails (DEMON restructured a path the extractor
+# reads), a labeled issue is filed instead — restructure blindness lasts
+# at most one day and is loud.
+#
+# Setup (one-time, in repo settings):
+#   * Secret: DEMON_PAT — fine-grained PAT, Contents:Read on
+#     daydreamlive/DEMON (the default GITHUB_TOKEN can't reach it).
+#   * Secret: ANTHROPIC_API_KEY — for the auto-fix agent (optional;
+#     without it the workflow is detection-only).
+#   * Settings > Actions > General: allow GitHub Actions to create and
+#     approve pull requests.
+
+on:
+  schedule:
+    # 14:00 UTC daily (06:00 PT) — post-Daydream working day, so any
+    # morning DEMON deploys are reflected by the time we check.
+    - cron: "0 14 * * *"
+  workflow_dispatch:
+    inputs:
+      demon_ref:
+        description: "DEMON ref to sync from"
+        default: "origin/main"
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: contract-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout demonTD
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Refuse if DEMON_PAT is missing
+        env:
+          PAT: ${{ secrets.DEMON_PAT }}
+        run: |
+          if [[ -z "$PAT" ]]; then
+            echo "::error::DEMON_PAT secret is not set. Create a fine-grained PAT with Contents:Read on daydreamlive/DEMON and add it under Settings > Secrets > Actions."
+            exit 2
+          fi
+
+      - name: Checkout DEMON
+        uses: actions/checkout@v4
+        with:
+          repository: daydreamlive/DEMON
+          token: ${{ secrets.DEMON_PAT }}
+          path: DEMON
+
+      - name: Keep the DEMON checkout out of demonTD's git status
+        run: echo "DEMON/" >> .git/info/exclude
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install numpy pytest
+
+      - name: Sync contract from DEMON
+        id: sync
+        continue-on-error: true
+        run: |
+          OLD_SHA=$(python3 -c "import json; print(json.load(open('vendor/demon_contract.json'))['source']['sha'])" 2>/dev/null || echo "none")
+          echo "old_sha=$OLD_SHA" >> "$GITHUB_OUTPUT"
+          # The checkout's default branch tip IS origin/main here; the
+          # ref input exists for workflow_dispatch experiments.
+          python3 scripts/sync_contract.py \
+              --demon ./DEMON \
+              --ref "${{ github.event.inputs.demon_ref || 'origin/main' }}" \
+              --no-fetch | tee sync-summary.txt
+          NEW_SHA=$(python3 -c "import json; print(json.load(open('vendor/demon_contract.json'))['source']['sha'])")
+          echo "new_sha=$NEW_SHA" >> "$GITHUB_OUTPUT"
+          if git diff --quiet -- vendor/demon_contract.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: File issue if the extractor broke (DEMON restructured)
+        if: steps.sync.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = 'Contract sync broken: extractor cannot read DEMON';
+            const body = [
+              '`scripts/sync_contract.py` failed against DEMON@main —',
+              'most likely a protocol/UI file moved (the extractor exits',
+              'loudly instead of going silently blind).',
+              '',
+              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              '## How to resolve',
+              '1. Read the failing step log — the script names every path it tried.',
+              '2. Update the candidate-path manifest at the top of `scripts/sync_contract.py`',
+              '   (PY_FILES / UI_FILES) or `parse_ts_label_overrides` if the label table reshaped.',
+              '3. Re-run locally: `python3 scripts/sync_contract.py --demon ~/git/DEMON`',
+              '',
+              '_Auto-managed by `.github/workflows/contract-sync.yml`._',
+            ].join('\n');
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              labels: 'protocol-drift', state: 'open',
+            });
+            const mine = existing.find(i => i.title.startsWith('Contract sync broken'));
+            if (mine) {
+              await github.rest.issues.update({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: mine.number, title, body });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: ['protocol-drift', 'auto-filed'] });
+            }
+            core.setFailed('sync_contract.py failed — see the issue.');
+
+      - name: Done — contract unchanged
+        if: steps.sync.outcome == 'success' && steps.sync.outputs.changed == 'false'
+        run: echo "vendor/demon_contract.json already matches DEMON@main."
+
+      - name: Contract tests (pre-fix)
+        id: pretest
+        if: steps.sync.outputs.changed == 'true'
+        continue-on-error: true
+        run: |
+          PYTHONPATH=src python3 -m pytest tests/ -q 2>&1 | tee pytest-report.txt
+
+      - name: Push rolling sync branch
+        if: steps.sync.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B contract-sync/auto
+          git add vendor/demon_contract.json
+          git commit -m "contract: sync DEMON@${NEW_SHA_SHORT}"
+          git push -f origin contract-sync/auto
+        env:
+          NEW_SHA_SHORT: ${{ steps.sync.outputs.new_sha }}
+
+      - name: Claude auto-fix
+        id: agent
+        if: steps.sync.outputs.changed == 'true' && steps.pretest.outcome == 'failure'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            The vendored DEMON wire contract (vendor/demon_contract.json)
+            was just re-synced from upstream
+            (${{ steps.sync.outputs.old_sha }} ->
+            ${{ steps.sync.outputs.new_sha }}) and the contract tests now
+            fail. The pre-fix pytest report is in ./pytest-report.txt and
+            the sync change summary in ./sync-summary.txt.
+
+            Restore parity by editing demonTD's surface:
+            - src/wire.py (encoders), src/params.py (Param entries),
+              src/events.py + src/demon_ext.py (event handlers),
+              src/session_config.py (SessionConfig fields).
+            - Add entries to contracts/parity_whitelist.json ONLY for
+              genuinely intentional feature gaps, each with a real
+              rationale (>= 20 chars) explaining WHY it is not drift.
+            - Read CLAUDE.md first; follow the repo's conventions.
+
+            Run `PYTHONPATH=src python3 -m pytest tests/ -q` until green.
+            Do NOT modify vendor/demon_contract.json, do NOT weaken or
+            delete tests, do NOT bump versions (the release flow does
+            that). Leave your changes uncommitted in the working tree.
+
+      - name: Contract tests (final)
+        id: finaltest
+        if: steps.sync.outputs.changed == 'true'
+        continue-on-error: true
+        run: |
+          PYTHONPATH=src python3 -m pytest tests/ -q 2>&1 | tee pytest-final.txt
+
+      - name: Commit agent fix (if any)
+        if: steps.sync.outputs.changed == 'true'
+        run: |
+          if ! git diff --quiet || [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "fix: restore contract parity with DEMON@${NEW_SHA_SHORT} (auto-drafted)" || true
+            git push -f origin contract-sync/auto
+          fi
+        env:
+          NEW_SHA_SHORT: ${{ steps.sync.outputs.new_sha }}
+
+      - name: Open or update the rolling PR
+        if: steps.sync.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OLD: ${{ steps.sync.outputs.old_sha }}
+          NEW: ${{ steps.sync.outputs.new_sha }}
+          FINAL: ${{ steps.finaltest.outcome }}
+        run: |
+          SHORT_NEW=$(echo "$NEW" | cut -c1-9)
+          TITLE="Contract sync: DEMON@${SHORT_NEW}"
+          if [[ "$FINAL" != "success" ]]; then
+            TITLE="$TITLE — auto-fix incomplete"
+          fi
+          {
+            echo "Nightly contract sync from \`daydreamlive/DEMON\`."
+            echo
+            echo "- upstream: \`$OLD\` -> \`$NEW\`"
+            echo "  ([compare](https://github.com/daydreamlive/DEMON/compare/${OLD}...${NEW}))"
+            echo
+            echo "## Sync summary"
+            echo '```'
+            cat sync-summary.txt
+            echo '```'
+            echo
+            echo "## Contract tests (final)"
+            echo '```'
+            tail -n 40 pytest-final.txt
+            echo '```'
+            if [[ "$FINAL" != "success" ]]; then
+              echo
+              echo "> [!WARNING]"
+              echo "> Tests are still red — the auto-fix did not (fully) land."
+              echo "> This PR is the detection artifact; finish the fix by hand"
+              echo "> or re-run the workflow."
+            fi
+            echo
+            echo "After merging: rebuild the .tox in TouchDesigner before the"
+            echo "next release (the vendored contract ships in the bundle)."
+            echo
+            echo "_Auto-managed by .github/workflows/contract-sync.yml._"
+          } > pr-body.md
+          EXISTING=$(gh pr list --head contract-sync/auto --state open --json number --jq '.[0].number' || echo "")
+          if [[ -n "$EXISTING" ]]; then
+            gh pr edit "$EXISTING" --title "$TITLE" --body-file pr-body.md
+            echo "::notice::Updated PR #$EXISTING"
+          else
+            gh pr create --head contract-sync/auto --base main \
+                --title "$TITLE" --body-file pr-body.md \
+                --label protocol-drift
+            echo "::notice::Opened new contract-sync PR"
+          fi
+
+      - name: Red X when drift landed un-fixed
+        if: steps.sync.outputs.changed == 'true' && steps.finaltest.outcome != 'success'
+        run: |
+          echo "::error::Contract drifted and the auto-fix did not go green — see the contract-sync/auto PR."
+          exit 1
