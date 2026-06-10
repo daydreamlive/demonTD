@@ -1,0 +1,48 @@
+{
+  "_README": [
+    "Intentional parity gaps between demonTD and the DEMON wire contract",
+    "(vendor/demon_contract.json). Every entry REQUIRES a rationale ('why'",
+    "this is a deliberate feature gap, not drift). tests/test_contract.py",
+    "enforces hygiene: an entry whose subject vanishes from the contract,",
+    "or that demonTD actually implements, FAILS the suite \u2014 the whitelist",
+    "cannot rot into a drift-hider. Glob patterns allowed in knob keys."
+  ],
+  "commands_not_sent": {
+    "set_depth": "Depth is Init-only in TD (immutable while connected); live depth retune is a UX feature we haven't built, not a parity gap.",
+    "loop_band": "TD's LoopBuffer does its own seam crossfade locally; the loop band isn't exposed as a TD par. Add an encoder + Loopbandstart/end pars to revisit.",
+    "manual_slot_add": "Activation-steering surface (manual slots) not built in TD; the steer_*/man_* knobs would come with it.",
+    "manual_slot_pop": "Activation-steering surface not built in TD; see manual_slot_add."
+  },
+  "events_ignored": {
+    "init_ack": "Server ack of the SessionConfig handshake; only meaningful when the client opts into telemetry_version, which TD does not send. No payload TD acts on.",
+    "manual_slot_count": "Slot-count echo for the activation-steering surface TD doesn't implement; see commands_not_sent.manual_slot_add."
+  },
+  "handshake_not_implemented": {
+    "upload_track": "TD streams the wired CHOP / file at Connect; there is no pre-stream upload-only flow, so upload_ok/upload_failed never arrive."
+  },
+  "config_fields_not_sent": {
+    "stem_source_mode": "The web client sends it only for custom-track stem modes; TD has no stems UX, omitting matches the JS default-fixture path.",
+    "lora_paths": "Pod-local filesystem paths resolved server-side; meaningless coming from a TD client.",
+    "backend": "Defaults to 'acestep' server-side and TD targets acestep pods only; sending it adds nothing."
+  },
+  "config_fields_extra": {
+    "compression": "Adapter-level key the server reads off the raw config dict (not a SessionConfig dataclass field, so not in the contract's config catalog). TD sends 'none' when the vendored zstd fails to load."
+  },
+  "knobs_not_streamed": {
+    "feedback_depth": "Init-style feedback depth; TD exposes feedback strength only \u2014 depth lives in the Init page Depth par (config), not the continuous stream.",
+    "x0_target": "Source-lock target blend requires a source latent workflow TD's Sources page doesn't drive yet.",
+    "steps_override": "TD treats steps as Init-only (Steps par in SessionConfig); live steps retune is not exposed.",
+    "sde_amp": "TD has no SDE-mode knob swap; the Denoise par streams `denoise` in both modes and the server ignores it under SDE."
+  },
+  "td_extra_knobs": {},
+  "knob_overrides": {},
+  "config_default_overrides": {
+    "prompt": "TD ships its own demo prompt (dubstep) as the Init prompt; the web installation seeds prompts from config.json `prompts`, not `engine`, so there is no single canonical starting prompt to pin to.",
+    "walk_window": "TD default False matches the SessionConfig dataclass default; the web installation ships true in config.json for long-source routing. TD users opt in per-session."
+  },
+  "label_overrides": {},
+  "lora_triggers_reviewed": {
+    "blob_sha": "315d913ff21393bd5d2c4342b78a99f4c0241982",
+    "why": "src/lora_triggers.py was last re-reviewed against this blob of web/lib/loraTriggers.ts. When the upstream blob changes, re-review the port and bump this SHA."
+  }
+}

@@ -179,10 +179,10 @@ INIT_PARAMS: list[Param] = [
     Param("Depth", "depth", "Init", "Int", "init", default=4,
           min=1, max=8, clamp_min=True, clamp_max=True, order=30,
           help="DiT pipeline depth (latency/quality tradeoff)."),
-    Param("Vaewindow", "vae_window", "Init", "Float", "init", default=6.0,
-          min=0.5, max=10.0, clamp_min=True, clamp_max=True, order=40,
+    Param("Vaewindow", "vae_window", "Init", "Float", "init", default=0.36,
+          min=0.1, max=10.0, clamp_min=True, clamp_max=True, order=40,
           label="VAE Window", help="VAE decoder sliding window in seconds. "
-                                   "Matches demon-public-demo default."),
+                                   "Matches the web installation default."),
     Param("Crop", "crop", "Init", "Float", "init", default=0.0,
           min=0.0, max=120.0, clamp_min=True, order=50,
           help="Crop input audio to N seconds (0 = no crop)."),
@@ -346,7 +346,7 @@ SYNTHESIS_PARAMS: list[Param] = [
     # — users perceive this knob as "how strong is the remix", not as
     # a diffusion-process knob. See DISPLAY_NAMES in
     # demon-public-demo/vendor/demon-ui/components/Performance/SliderTile.tsx.
-    Param("Denoise", "denoise", "Synthesis", "Float", "continuous", default=0.85,
+    Param("Denoise", "denoise", "Synthesis", "Float", "continuous", default=0.7,
           min=0.0, max=1.0, clamp_min=True, clamp_max=True, order=10,
           label="Strength",
           help="How strong the remix is — at 0 the model echoes the source "
@@ -369,9 +369,12 @@ SYNTHESIS_PARAMS: list[Param] = [
     Param("Feedback", "feedback", "Synthesis", "Float", "continuous", default=0.0,
           min=0.0, max=1.0, clamp_min=True, clamp_max=True, order=30,
           help="Feedback loop (pro). Use with caution."),
-    Param("Shift", "shift", "Synthesis", "Float", "continuous", default=0.5,
-          min=0.0, max=1.0, clamp_min=True, clamp_max=True, order=40,
-          help="Temporal phase alignment (pro)."),
+    # Range and default come from the knob registry ([1, 6], 3.5) — the
+    # server clamps into that band, so the old [0, 1] TD range left the
+    # whole slider in dead clamped-to-1.0 travel.
+    Param("Shift", "shift", "Synthesis", "Float", "continuous", default=3.5,
+          min=1.0, max=6.0, clamp_min=True, clamp_max=True, order=40,
+          help="Flow shift — timing/curve shape (pro)."),
     # Wire key is `hint_strength`, but the canonical's user-facing label
     # for this control is "Structure" (see demon-public-demo/vendor/demon-ui/
     # components/Performance/SliderTile.tsx and LiteControls.tsx). The
@@ -379,7 +382,7 @@ SYNTHESIS_PARAMS: list[Param] = [
     # rhythm / dynamics — i.e. its structure. Keep the Param `name` as
     # `Hintstrength` so the wire mapping is unchanged.
     Param("Hintstrength", "hint_strength", "Synthesis", "Float", "continuous",
-          default=1.4, min=0.0, max=2.0, clamp_min=True, clamp_max=True,
+          default=1.0, min=0.0, max=1.0, clamp_min=True, clamp_max=True,
           order=50, label="Structure",
           help="How closely the model follows the original song's structure "
                "— sections, rhythm, dynamics. Crank it up to keep the "
@@ -390,17 +393,18 @@ SYNTHESIS_PARAMS: list[Param] = [
           order=60, label="Timbre Strength",
           help="Source vs generation timbre blend (rides own WS message)."),
     Param("Guidancescale", "guidance_scale", "Synthesis", "Float", "continuous",
-          default=7.0, min=0.0, max=15.0, clamp_min=True, clamp_max=True,
+          default=2.5, min=1.0, max=15.0, clamp_min=True, clamp_max=True,
           order=70, label="Guidance Scale",
-          help="RCFG guidance (pro)."),
+          help="RCFG guidance (pro). 1.0 = guidance off (the registry "
+               "floor; the server clamps below it)."),
     Param("Cfgrescale", "cfg_rescale", "Synthesis", "Float", "continuous",
           default=0.0, min=0.0, max=1.0, clamp_min=True, clamp_max=True,
           order=80, label="CFG Rescale",
           help="CFG saturation taming (pro)."),
-    Param("Odenoise", "ode_noise", "Synthesis", "Float", "continuous",
-          default=0.0, min=0.0, max=0.5, clamp_min=True, clamp_max=True,
-          order=90, label="ODE Noise",
-          help="ODE noise injection (pro)."),
+    # `ode_noise` was removed from the server's knob registry — the
+    # streaming runner no longer reads a scalar by that name (only the
+    # internal ode_noise_curve survives). The old Odenoise par was dead
+    # slider travel; dropped in the contract-parity pass.
     Param("Periodicity", "periodicity", "Synthesis", "Float", "continuous",
           default=0.0, min=0.0, max=12.5, clamp_min=True, clamp_max=True,
           order=100, help="Beat-grid periodicity for SDE (pro)."),
@@ -430,10 +434,11 @@ SYNTHESIS_PARAMS: list[Param] = [
 # -----------------------------------------------------------------------------
 RCFG_DCW_PARAMS: list[Param] = [
     Param("Rcfgmode", "rcfg_mode", "RCFG+DCW", "Menu", "continuous",
-          default="off", order=10, label="RCFG Mode",
-          menu_names=("off", "initialize", "self"),
-          menu_labels=("Off", "Initialize", "Self"),
-          help="RCFG mode selection."),
+          default="initialize", order=10, label="RCFG Mode",
+          menu_names=("off", "initialize", "self", "full"),
+          menu_labels=("Off", "Initialize", "Self", "Full"),
+          help="RCFG mode selection. Default matches the web "
+               "installation (config.json controls)."),
     Param("Dcwheader", None, "RCFG+DCW", "Header", "session",
           order=20, section_header=True, label="DCW (Wavelet Domain Correction)"),
     Param("Dcwenabled", "dcw_enabled", "RCFG+DCW", "Toggle", "continuous",

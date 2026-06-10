@@ -1,0 +1,1711 @@
+{
+  "artifact_version": 1,
+  "constants": {
+    "CROSSFADE_SECONDS": 0.025,
+    "PROTOCOL_VERSION": 1,
+    "SAMPLE_RATE": 48000,
+    "SLICE_FLAG_DELTA": 1,
+    "SLICE_FLAG_RAW": 0,
+    "SLICE_HDR_FMT": "<BIIHffI",
+    "SLICE_HDR_SIZE": 23,
+    "T": 1500
+  },
+  "knobs": {
+    "ode": {
+      "cfg_rescale": {
+        "bank": false,
+        "default": 0.0,
+        "description": "APG norm rescale toward vt_pos magnitude. Only applied when rcfg_mode != 'off'.",
+        "group": "guidance",
+        "max": 1.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch13": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Keystone channel amplifier ch13",
+        "group": "keystones",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch14": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Keystone channel amplifier ch14",
+        "group": "keystones",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch19": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Keystone channel amplifier ch19",
+        "group": "keystones",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch23": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Keystone channel amplifier ch23",
+        "group": "keystones",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch29": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Keystone channel amplifier ch29",
+        "group": "keystones",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch56": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Keystone channel amplifier ch56",
+        "group": "keystones",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch_g0": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Channel-group amplifier ch_g0",
+        "group": "groups",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch_g1": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Channel-group amplifier ch_g1",
+        "group": "groups",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch_g2": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Channel-group amplifier ch_g2",
+        "group": "groups",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch_g3": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Channel-group amplifier ch_g3",
+        "group": "groups",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch_g4": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Channel-group amplifier ch_g4",
+        "group": "groups",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch_g5": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Channel-group amplifier ch_g5",
+        "group": "groups",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch_g6": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Channel-group amplifier ch_g6",
+        "group": "groups",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch_g7": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Channel-group amplifier ch_g7",
+        "group": "groups",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "dcw_enabled": {
+        "bank": false,
+        "default": true,
+        "description": "Enable the DCW wavelet-domain corrector.",
+        "group": "dcw",
+        "options": [
+          false,
+          true
+        ],
+        "type": "bool"
+      },
+      "dcw_high_scaler": {
+        "bank": false,
+        "default": 0.02,
+        "description": "DCW high-band push strength.",
+        "group": "dcw",
+        "max": 0.5,
+        "min": 0.0,
+        "type": "float"
+      },
+      "dcw_mag_phase": {
+        "bank": false,
+        "default": 0.0,
+        "description": "DCW magnitude+phase fader (advanced; 0 = upstream behavior).",
+        "group": "dcw",
+        "max": 1.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "dcw_mode": {
+        "bank": false,
+        "default": "double",
+        "description": "DCW correction band.",
+        "group": "dcw",
+        "options": [
+          "low",
+          "high",
+          "double",
+          "pix"
+        ],
+        "type": "enum"
+      },
+      "dcw_mult_blend": {
+        "bank": false,
+        "default": 0.0,
+        "description": "DCW multiplicative-blend fader (advanced; 0 = upstream behavior).",
+        "group": "dcw",
+        "max": 1.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "dcw_scaler": {
+        "bank": false,
+        "default": 0.05,
+        "description": "DCW low-band push strength.",
+        "group": "dcw",
+        "max": 0.5,
+        "min": 0.0,
+        "type": "float"
+      },
+      "dcw_soft_thresh": {
+        "bank": false,
+        "default": 0.0,
+        "description": "DCW soft-threshold sparsity (advanced; 0 = upstream behavior).",
+        "group": "dcw",
+        "max": 0.3,
+        "min": 0.0,
+        "type": "float"
+      },
+      "dcw_wavelet": {
+        "bank": false,
+        "default": "haar",
+        "description": "DCW wavelet basis.",
+        "group": "dcw",
+        "options": [
+          "haar",
+          "db4",
+          "sym8",
+          "db8"
+        ],
+        "type": "enum"
+      },
+      "denoise": {
+        "bank": true,
+        "default": 0.0,
+        "description": "ODE denoise strength",
+        "group": "core",
+        "max": 1.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "feedback": {
+        "bank": true,
+        "default": 0.0,
+        "description": "Feedback amount",
+        "group": "core",
+        "max": 1.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "feedback_depth": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Feedback delay-tap depth in ticks (1 = last, N = N ticks back)",
+        "group": "core",
+        "max": 8.0,
+        "min": 1.0,
+        "type": "int"
+      },
+      "guidance_scale": {
+        "bank": false,
+        "default": 1.0,
+        "description": "RCFG guidance scale. Only applied when rcfg_mode != 'off'.",
+        "group": "guidance",
+        "max": 15.0,
+        "min": 1.0,
+        "type": "float"
+      },
+      "hint_strength": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Structure (semantic hint) blend strength",
+        "group": "core",
+        "max": 1.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "rcfg_mode": {
+        "bank": false,
+        "default": "off",
+        "description": "Residual-CFG mode. String-valued; set via the set_rcfg_mode tool, not set_knob.",
+        "group": "guidance",
+        "options": [
+          "off",
+          "self",
+          "initialize",
+          "full"
+        ],
+        "type": "enum"
+      },
+      "seed": {
+        "bank": true,
+        "default": 0.0,
+        "description": "Stream seed (uint32 integer; passed to torch.manual_seed)",
+        "group": "core",
+        "max": 4294967295.0,
+        "min": 0.0,
+        "type": "int"
+      },
+      "shift": {
+        "bank": true,
+        "default": 3.5,
+        "description": "Flow shift (timing/curve shape). Passed verbatim to the diffusion solver.",
+        "group": "core",
+        "max": 6.0,
+        "min": 1.0,
+        "type": "float"
+      },
+      "steps_override": {
+        "bank": false,
+        "default": 8.0,
+        "description": "Diffusion step count. Lower = lower quality, higher = more latency. Changing rebuilds the StreamPipeline.",
+        "group": "core",
+        "max": 16.0,
+        "min": 1.0,
+        "type": "int"
+      },
+      "x0_target": {
+        "bank": true,
+        "default": 0.0,
+        "description": "Scalar blend toward the x0 source-lock target (second half of the schedule). Requires a source latent.",
+        "group": "core",
+        "max": 1.0,
+        "min": 0.0,
+        "type": "float"
+      }
+    },
+    "sde": {
+      "cfg_rescale": {
+        "bank": false,
+        "default": 0.0,
+        "description": "APG norm rescale toward vt_pos magnitude. Only applied when rcfg_mode != 'off'.",
+        "group": "guidance",
+        "max": 1.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch13": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Keystone channel amplifier ch13",
+        "group": "keystones",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch14": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Keystone channel amplifier ch14",
+        "group": "keystones",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch19": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Keystone channel amplifier ch19",
+        "group": "keystones",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch23": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Keystone channel amplifier ch23",
+        "group": "keystones",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch29": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Keystone channel amplifier ch29",
+        "group": "keystones",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch56": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Keystone channel amplifier ch56",
+        "group": "keystones",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch_g0": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Channel-group amplifier ch_g0",
+        "group": "groups",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch_g1": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Channel-group amplifier ch_g1",
+        "group": "groups",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch_g2": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Channel-group amplifier ch_g2",
+        "group": "groups",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch_g3": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Channel-group amplifier ch_g3",
+        "group": "groups",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch_g4": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Channel-group amplifier ch_g4",
+        "group": "groups",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch_g5": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Channel-group amplifier ch_g5",
+        "group": "groups",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch_g6": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Channel-group amplifier ch_g6",
+        "group": "groups",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "ch_g7": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Channel-group amplifier ch_g7",
+        "group": "groups",
+        "max": 3.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "dcw_enabled": {
+        "bank": false,
+        "default": true,
+        "description": "Enable the DCW wavelet-domain corrector.",
+        "group": "dcw",
+        "options": [
+          false,
+          true
+        ],
+        "type": "bool"
+      },
+      "dcw_high_scaler": {
+        "bank": false,
+        "default": 0.02,
+        "description": "DCW high-band push strength.",
+        "group": "dcw",
+        "max": 0.5,
+        "min": 0.0,
+        "type": "float"
+      },
+      "dcw_mag_phase": {
+        "bank": false,
+        "default": 0.0,
+        "description": "DCW magnitude+phase fader (advanced; 0 = upstream behavior).",
+        "group": "dcw",
+        "max": 1.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "dcw_mode": {
+        "bank": false,
+        "default": "double",
+        "description": "DCW correction band.",
+        "group": "dcw",
+        "options": [
+          "low",
+          "high",
+          "double",
+          "pix"
+        ],
+        "type": "enum"
+      },
+      "dcw_mult_blend": {
+        "bank": false,
+        "default": 0.0,
+        "description": "DCW multiplicative-blend fader (advanced; 0 = upstream behavior).",
+        "group": "dcw",
+        "max": 1.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "dcw_scaler": {
+        "bank": false,
+        "default": 0.05,
+        "description": "DCW low-band push strength.",
+        "group": "dcw",
+        "max": 0.5,
+        "min": 0.0,
+        "type": "float"
+      },
+      "dcw_soft_thresh": {
+        "bank": false,
+        "default": 0.0,
+        "description": "DCW soft-threshold sparsity (advanced; 0 = upstream behavior).",
+        "group": "dcw",
+        "max": 0.3,
+        "min": 0.0,
+        "type": "float"
+      },
+      "dcw_wavelet": {
+        "bank": false,
+        "default": "haar",
+        "description": "DCW wavelet basis.",
+        "group": "dcw",
+        "options": [
+          "haar",
+          "db4",
+          "sym8",
+          "db8"
+        ],
+        "type": "enum"
+      },
+      "feedback": {
+        "bank": true,
+        "default": 0.0,
+        "description": "Feedback amount",
+        "group": "core",
+        "max": 1.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "feedback_depth": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Feedback delay-tap depth in ticks (1 = last, N = N ticks back)",
+        "group": "core",
+        "max": 8.0,
+        "min": 1.0,
+        "type": "int"
+      },
+      "guidance_scale": {
+        "bank": false,
+        "default": 1.0,
+        "description": "RCFG guidance scale. Only applied when rcfg_mode != 'off'.",
+        "group": "guidance",
+        "max": 15.0,
+        "min": 1.0,
+        "type": "float"
+      },
+      "hint_strength": {
+        "bank": true,
+        "default": 1.0,
+        "description": "Structure (semantic hint) blend strength",
+        "group": "core",
+        "max": 1.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "periodicity": {
+        "bank": true,
+        "default": 0.0,
+        "description": "SDE periodicity",
+        "group": "core",
+        "max": 12.5,
+        "min": 0.0,
+        "type": "float"
+      },
+      "rcfg_mode": {
+        "bank": false,
+        "default": "off",
+        "description": "Residual-CFG mode. String-valued; set via the set_rcfg_mode tool, not set_knob.",
+        "group": "guidance",
+        "options": [
+          "off",
+          "self",
+          "initialize",
+          "full"
+        ],
+        "type": "enum"
+      },
+      "sde_amp": {
+        "bank": true,
+        "default": 0.0,
+        "description": "SDE diffusion amplitude (replaces denoise in SDE mode)",
+        "group": "core",
+        "max": 1.0,
+        "min": 0.0,
+        "type": "float"
+      },
+      "seed": {
+        "bank": true,
+        "default": 0.0,
+        "description": "Stream seed (uint32 integer; passed to torch.manual_seed)",
+        "group": "core",
+        "max": 4294967295.0,
+        "min": 0.0,
+        "type": "int"
+      },
+      "shift": {
+        "bank": true,
+        "default": 3.5,
+        "description": "Flow shift (timing/curve shape). Passed verbatim to the diffusion solver.",
+        "group": "core",
+        "max": 6.0,
+        "min": 1.0,
+        "type": "float"
+      },
+      "steps_override": {
+        "bank": false,
+        "default": 8.0,
+        "description": "Diffusion step count. Lower = lower quality, higher = more latency. Changing rebuilds the StreamPipeline.",
+        "group": "core",
+        "max": 16.0,
+        "min": 1.0,
+        "type": "int"
+      },
+      "x0_target": {
+        "bank": true,
+        "default": 0.0,
+        "description": "Scalar blend toward the x0 source-lock target (second half of the schedule). Requires a source latent.",
+        "group": "core",
+        "max": 1.0,
+        "min": 0.0,
+        "type": "float"
+      }
+    },
+    "version": 1
+  },
+  "protocol": {
+    "commands": {
+      "clear_structure_source": {
+        "binary": false,
+        "binary_optional": false,
+        "description": "Drop the structure override; restore the source's own context_latent. Acked by structure_cleared.",
+        "fields": {},
+        "origin_sensitive": false,
+        "requires": "structure"
+      },
+      "clear_timbre_source": {
+        "binary": false,
+        "binary_optional": false,
+        "description": "Drop the timbre override; fall back to self-timbre. Acked by timbre_cleared.",
+        "fields": {},
+        "origin_sensitive": false,
+        "requires": "timbre"
+      },
+      "disable_lora": {
+        "binary": false,
+        "binary_optional": false,
+        "description": "Disable a LoRA and drop its lora_str_<id> knob.",
+        "fields": {
+          "id": {
+            "required": true,
+            "type": "str"
+          }
+        },
+        "origin_sensitive": false,
+        "requires": "lora"
+      },
+      "enable_lora": {
+        "binary": false,
+        "binary_optional": false,
+        "description": "Enable a LoRA; allocates a lora_str_<id> knob.",
+        "fields": {
+          "id": {
+            "description": "LoRA id/stem (see /api/loras).",
+            "required": true,
+            "type": "str"
+          },
+          "strength": {
+            "description": "Target strength the refit lands at.",
+            "required": false,
+            "type": "float"
+          }
+        },
+        "origin_sensitive": false,
+        "requires": "lora"
+      },
+      "loop_band": {
+        "binary": false,
+        "binary_optional": false,
+        "description": "Arm / move / clear the playback loop band.",
+        "fields": {
+          "end_sec": {
+            "description": "Loop end in seconds; null/degenerate clears.",
+            "nullable": true,
+            "required": false,
+            "type": "float"
+          },
+          "start_sec": {
+            "description": "Loop start in seconds; null/degenerate clears.",
+            "nullable": true,
+            "required": false,
+            "type": "float"
+          }
+        },
+        "origin_sensitive": false,
+        "requires": "loop_band"
+      },
+      "manual_slot_add": {
+        "binary": false,
+        "binary_optional": false,
+        "description": "Allocate the next manual steering slot (LIFO); allocates its four man_*_<N> knobs. Echoed back as manual_slot_count on success AND refusal (at manual_slot_cap).",
+        "fields": {},
+        "origin_sensitive": false,
+        "requires": "steering"
+      },
+      "manual_slot_pop": {
+        "binary": false,
+        "binary_optional": false,
+        "description": "Remove the highest-numbered manual steering slot and drop its man_*_<N> knobs (LIFO; interior deletion is not supported). Echoed back as manual_slot_count on success AND refusal (empty registry).",
+        "fields": {},
+        "origin_sensitive": false,
+        "requires": "steering"
+      },
+      "params": {
+        "binary": false,
+        "binary_optional": false,
+        "description": "Continuous parameter update; sent every tick (~125 Hz) carrying the full knob dict.",
+        "echo_event": "params_echo",
+        "fields": {
+          "playback_pos": {
+            "default": 0.0,
+            "description": "Playhead position in SECONDS (not a 0..1 ratio); used for time-keyed curve sampling.",
+            "required": false,
+            "type": "float"
+          },
+          "raw": {
+            "description": "Knob name -> value map. The payload schema is the separate /api/knobs manifest; values are clamped/validated server-side.",
+            "required": true,
+            "type": "dict"
+          }
+        },
+        "origin_sensitive": true
+      },
+      "prompt": {
+        "binary": false,
+        "binary_optional": false,
+        "description": "Re-encode the live prompt (text-encoder pass).",
+        "fields": {
+          "key": {
+            "description": "Musical key, e.g. \"C major\".",
+            "required": false,
+            "type": "str"
+          },
+          "tags": {
+            "description": "Prompt A (wire text; enabled-LoRA triggers are prepended client-side).",
+            "required": true,
+            "type": "str"
+          },
+          "tags_b": {
+            "description": "Optional prompt B, cached for A/B blend.",
+            "required": false,
+            "type": "str"
+          },
+          "time_signature": {
+            "description": "Meter numerator, e.g. \"3\"/\"4\"/\"6\".",
+            "required": false,
+            "type": "str"
+          }
+        },
+        "origin_sensitive": false
+      },
+      "set_depth": {
+        "binary": false,
+        "binary_optional": false,
+        "description": "Live pipeline_depth retune. Echoed back as depth_applied.",
+        "fields": {
+          "value": {
+            "description": "Target ring depth; clamped to [1, max_pipeline_depth].",
+            "required": true,
+            "type": "int"
+          }
+        },
+        "origin_sensitive": false,
+        "requires": "depth"
+      },
+      "set_interp_method": {
+        "binary": false,
+        "binary_optional": false,
+        "description": "Switch a blend path between slerp (norm-preserving) and linear.",
+        "fields": {
+          "method": {
+            "description": "Interpolation curve.",
+            "options": [
+              "slerp",
+              "linear"
+            ],
+            "required": true,
+            "type": "enum"
+          },
+          "path": {
+            "description": "Which live blend to retune.",
+            "options": [
+              "prompt",
+              "timbre",
+              "structure",
+              "feedback"
+            ],
+            "required": true,
+            "type": "enum"
+          }
+        },
+        "origin_sensitive": false
+      },
+      "set_prompt_blend": {
+        "binary": false,
+        "binary_optional": false,
+        "description": "Lerp cached prompt A/B conditioning. Cheap; no encode pass.",
+        "echo_event": "prompt_blend_echo",
+        "fields": {
+          "value": {
+            "default": 0.0,
+            "description": "0.0 = A, 1.0 = B. Clamped to [0,1].",
+            "required": true,
+            "type": "float"
+          }
+        },
+        "origin_sensitive": true
+      },
+      "set_structure_fixture": {
+        "binary": false,
+        "binary_optional": false,
+        "description": "Use a server-side fixture as the structure reference (no upload round-trip).",
+        "fields": {
+          "name": {
+            "description": "Fixture name (see /api/fixtures).",
+            "required": true,
+            "type": "str"
+          }
+        },
+        "origin_sensitive": false,
+        "requires": "structure"
+      },
+      "set_structure_source": {
+        "binary": true,
+        "binary_optional": false,
+        "description": "Upload audio as the structure (semantic-hint) reference. JSON header followed by one binary PCM frame: ``<II`` (channels, samples) then interleaved float32 at 48 kHz. Acked by structure_set / structure_failed.",
+        "fields": {
+          "name": {
+            "default": "structure",
+            "description": "Label echoed back in structure_set.",
+            "required": false,
+            "type": "str"
+          }
+        },
+        "origin_sensitive": false,
+        "requires": "structure"
+      },
+      "set_timbre_fixture": {
+        "binary": false,
+        "binary_optional": false,
+        "description": "Use a server-side fixture as the timbre reference (no upload round-trip).",
+        "fields": {
+          "name": {
+            "description": "Fixture name (see /api/fixtures).",
+            "required": true,
+            "type": "str"
+          }
+        },
+        "origin_sensitive": false,
+        "requires": "timbre"
+      },
+      "set_timbre_source": {
+        "binary": true,
+        "binary_optional": false,
+        "description": "Upload audio as the timbre reference. JSON header followed by one binary PCM frame: ``<II`` (channels, samples) then interleaved float32 at 48 kHz. Acked by timbre_set / timbre_failed.",
+        "fields": {
+          "name": {
+            "default": "timbre",
+            "description": "Label echoed back in timbre_set.",
+            "required": false,
+            "type": "str"
+          }
+        },
+        "origin_sensitive": false,
+        "requires": "timbre"
+      },
+      "set_timbre_strength": {
+        "binary": false,
+        "binary_optional": false,
+        "description": "Blend the cached (silence, full) timbre conditioning pair.",
+        "fields": {
+          "value": {
+            "default": 1.0,
+            "description": "1.0 = full reference, 0.0 = silence baseline. Clamped to [0,1].",
+            "required": true,
+            "type": "float"
+          }
+        },
+        "origin_sensitive": false,
+        "requires": "timbre"
+      },
+      "swap_source": {
+        "binary": true,
+        "binary_optional": true,
+        "description": "Replace the playback source in-flight. A binary PCM frame follows UNLESS use_server_source is set. Acked by swap_ready (+ binary buffer) / swap_failed.",
+        "fields": {
+          "fixture_name": {
+            "description": "Source label; for server-side loads, the fixture/upload name to read off the pod's disk.",
+            "required": false,
+            "type": "str"
+          },
+          "key": {
+            "required": false,
+            "type": "str"
+          },
+          "stem_source_mode": {
+            "description": "For uploads: which model-ripped stem feeds inference.",
+            "options": [
+              "full",
+              "vocals",
+              "instruments"
+            ],
+            "required": false,
+            "type": "enum"
+          },
+          "tags": {
+            "description": "Optional new prompt A.",
+            "required": false,
+            "type": "str"
+          },
+          "time_signature": {
+            "required": false,
+            "type": "str"
+          },
+          "use_server_source": {
+            "description": "When true, the server loads the named source off its own disk and NO binary frame is sent.",
+            "required": false,
+            "type": "bool"
+          }
+        },
+        "origin_sensitive": false,
+        "requires": "swap"
+      }
+    },
+    "config": {
+      "backend": {
+        "default": "acestep",
+        "required": false,
+        "type": "str"
+      },
+      "client_id": {
+        "nullable": true,
+        "required": false,
+        "type": "str"
+      },
+      "crop": {
+        "default": 0.0,
+        "required": false,
+        "type": "float"
+      },
+      "depth": {
+        "default": 4,
+        "required": false,
+        "type": "int"
+      },
+      "enabled_loras": {
+        "default": [],
+        "required": false,
+        "type": "list"
+      },
+      "fast_vae": {
+        "default": false,
+        "required": false,
+        "type": "bool"
+      },
+      "fixture_name": {
+        "nullable": true,
+        "required": false,
+        "type": "str"
+      },
+      "lead_ceiling_s": {
+        "default": 1.35,
+        "required": false,
+        "type": "float"
+      },
+      "lead_floor_s": {
+        "default": 0.25,
+        "required": false,
+        "type": "float"
+      },
+      "lead_release_tau_s": {
+        "default": 1.5,
+        "required": false,
+        "type": "float"
+      },
+      "lora": {
+        "default": false,
+        "required": false,
+        "type": "bool"
+      },
+      "lora_paths": {
+        "default": [],
+        "required": false,
+        "type": "list"
+      },
+      "lora_strengths": {
+        "default": {},
+        "required": false,
+        "type": "dict"
+      },
+      "prompt": {
+        "default": "instrumental music",
+        "required": false,
+        "type": "str"
+      },
+      "prompt_b": {
+        "nullable": true,
+        "required": false,
+        "type": "str"
+      },
+      "sde": {
+        "default": false,
+        "required": false,
+        "type": "bool"
+      },
+      "stem_source_mode": {
+        "nullable": true,
+        "required": false,
+        "type": "str"
+      },
+      "steps": {
+        "default": 8,
+        "required": false,
+        "type": "int"
+      },
+      "use_server_fixture": {
+        "default": false,
+        "required": false,
+        "type": "bool"
+      },
+      "vae_window": {
+        "default": 0.36,
+        "required": false,
+        "type": "float"
+      },
+      "walk_window": {
+        "default": false,
+        "required": false,
+        "type": "bool"
+      },
+      "walk_window_s": {
+        "default": 60.0,
+        "required": false,
+        "type": "float"
+      }
+    },
+    "events": {
+      "command_failed": {
+        "binary_follow": false,
+        "description": "A `requires`-tagged command was rejected because the session's backend lacks the capability (loud failure, never a silent no-op). The command was NOT applied. With only the acestep backend registered this fires solely for LoRA commands on a lora-disabled session.",
+        "fields": {
+          "command": {
+            "description": "The rejected command's wire name.",
+            "required": true,
+            "type": "str"
+          },
+          "error": {
+            "description": "Human-readable reason.",
+            "required": false,
+            "type": "str"
+          },
+          "requires": {
+            "description": "The Capabilities field the command needs and the session's backend doesn't declare.",
+            "required": true,
+            "type": "str"
+          }
+        }
+      },
+      "depth_applied": {
+        "binary_follow": false,
+        "description": "Ack for set_depth.",
+        "fields": {
+          "value": {
+            "description": "The clamped applied depth.",
+            "required": true,
+            "type": "int"
+          }
+        }
+      },
+      "error": {
+        "binary_follow": false,
+        "description": "Structured init failure (sent during the handshake).",
+        "fields": {
+          "build_command": {
+            "required": false,
+            "type": "str"
+          },
+          "code": {
+            "required": false,
+            "type": "str"
+          },
+          "duration_s": {
+            "description": "Present only on the engine_not_built code: the source duration whose TRT profile is missing.",
+            "required": false,
+            "type": "float"
+          },
+          "message": {
+            "required": false,
+            "type": "str"
+          }
+        }
+      },
+      "init_ack": {
+        "binary_follow": false,
+        "description": "Optional telemetry ack emitted after config parse but before audio/model init. Sent ONLY when the config opts in via telemetry_version, so old clients never see it.",
+        "fields": {
+          "client_id": {
+            "description": "The config client_id echoed back, or null when the client sent none.",
+            "nullable": true,
+            "required": false,
+            "type": "str"
+          },
+          "session_id": {
+            "description": "Server-minted session id, sent as soon as log context binds so client startup failures correlate with pod logs.",
+            "required": false,
+            "type": "str"
+          }
+        }
+      },
+      "lora_catalog": {
+        "binary_follow": false,
+        "description": "Refreshed LoRA catalog after enable/disable.",
+        "fields": {
+          "catalog": {
+            "required": true,
+            "type": "list"
+          }
+        }
+      },
+      "manual_slot_count": {
+        "binary_follow": false,
+        "description": "Ack for manual_slot_add / manual_slot_pop \u2014 emitted on success and refusal alike so the client's +/- UI resyncs either way.",
+        "fields": {
+          "count": {
+            "description": "The live manual steering slot count after the command.",
+            "required": true,
+            "type": "int"
+          }
+        }
+      },
+      "params_echo": {
+        "binary_follow": false,
+        "description": "MCP-driven knob change echoed so the browser mirrors it; the browser's own param updates do not echo.",
+        "fields": {
+          "raw": {
+            "required": true,
+            "type": "dict"
+          }
+        }
+      },
+      "params_update": {
+        "binary_follow": false,
+        "description": "Periodic echo of the live param/telemetry snapshot.",
+        "fields": {
+          "params": {
+            "description": "Applied params + runtime telemetry (num_gens, tick_ms, dec_ms).",
+            "required": true,
+            "type": "dict"
+          }
+        }
+      },
+      "prompt_applied": {
+        "binary_follow": false,
+        "description": "Ack that a prompt re-encode completed.",
+        "fields": {
+          "tags": {
+            "required": false,
+            "type": "str"
+          }
+        }
+      },
+      "prompt_blend_echo": {
+        "binary_follow": false,
+        "description": "MCP-driven prompt-blend echo (the dedicated blend slider rides its own channel, not params).",
+        "fields": {
+          "value": {
+            "required": true,
+            "type": "float"
+          }
+        }
+      },
+      "ready": {
+        "binary_follow": true,
+        "description": "First JSON after the upload handshake, followed by the binary float16 initial buffer.",
+        "fields": {
+          "bpm": {
+            "nullable": true,
+            "required": false,
+            "type": "float"
+          },
+          "capabilities": {
+            "description": "Backend capability mask: {capability: bool} over the Capabilities fields (swap, timbre, structure, lora, ...). Client panels and MCP tools gate on it; commands tagged with a matching `requires` fail with command_failed when the bit is false.",
+            "required": false,
+            "type": "dict"
+          },
+          "channels": {
+            "required": true,
+            "type": "int"
+          },
+          "checkpoint": {
+            "required": false,
+            "type": "str"
+          },
+          "checkpoint_scale": {
+            "required": false,
+            "type": "str"
+          },
+          "duration": {
+            "required": true,
+            "type": "float"
+          },
+          "geometry": {
+            "description": "Backend-declared audio geometry: {sample_rate, channels, chunk_rate_hz, duration_s|null}. chunk_rate_hz is the generation cadence (latent fps for diffusion, frame rate for AR models); duration_s null is reserved for endless streams.",
+            "required": false,
+            "type": "dict"
+          },
+          "key": {
+            "nullable": true,
+            "required": false,
+            "type": "str"
+          },
+          "knob_manifest": {
+            "description": "Per-session knob manifest: the same {version, knobs} envelope GET /api/knobs serves, but backend-owned and session-resolved (SDE mode, enabled lora_str_<id> knobs). /api/knobs remains the static pre-session probe.",
+            "required": false,
+            "type": "dict"
+          },
+          "lora_catalog": {
+            "required": false,
+            "type": "list"
+          },
+          "lora_dir": {
+            "required": false,
+            "type": "str"
+          },
+          "lora_pending_enable": {
+            "description": "LoRA ids the server will auto-enable on the first tick (from the session's initial enable set); empty when none.",
+            "required": false,
+            "type": "list"
+          },
+          "manual_slot_cap": {
+            "description": "Server-imposed ceiling on manual steering slots; gates the client's + button.",
+            "required": false,
+            "type": "int"
+          },
+          "manual_slot_count": {
+            "description": "Active manual steering slot count; drives the client's man_*_<N> row rendering. Updated live via the manual_slot_count event.",
+            "required": false,
+            "type": "int"
+          },
+          "max_pipeline_depth": {
+            "required": false,
+            "type": "int"
+          },
+          "pipeline_depth": {
+            "required": false,
+            "type": "int"
+          },
+          "sample_rate": {
+            "required": true,
+            "type": "int"
+          },
+          "session_id": {
+            "description": "Server-minted session id, echoed for client/analytics log correlation.",
+            "required": false,
+            "type": "str"
+          },
+          "steering_available": {
+            "description": "True when the session's checkpoint has a reachable steering-vector bundle; false hides the steering surface (the steer_*/man_* knobs are absent from the manifest too).",
+            "required": false,
+            "type": "bool"
+          },
+          "time_signature": {
+            "nullable": true,
+            "required": false,
+            "type": "str"
+          }
+        }
+      },
+      "stem_assets": {
+        "binary_follow": true,
+        "description": "Stem-overlay header; one binary float16 buffer per listed stem follows, in order.",
+        "fields": {
+          "channels": {
+            "required": true,
+            "type": "int"
+          },
+          "fixture_name": {
+            "required": true,
+            "type": "str"
+          },
+          "frames": {
+            "required": true,
+            "type": "int"
+          },
+          "sample_rate": {
+            "required": true,
+            "type": "int"
+          },
+          "source_mode": {
+            "options": [
+              "full",
+              "vocals",
+              "instruments"
+            ],
+            "required": false,
+            "type": "enum"
+          },
+          "stems": {
+            "description": "Ordered subset of (\"vocals\",\"instruments\").",
+            "required": true,
+            "type": "list"
+          }
+        }
+      },
+      "stem_failed": {
+        "binary_follow": false,
+        "description": "Stem extraction/overlay failure.",
+        "fields": {
+          "error": {
+            "required": false,
+            "type": "str"
+          },
+          "fixture_name": {
+            "required": false,
+            "type": "str"
+          }
+        }
+      },
+      "structure_cleared": {
+        "binary_follow": false,
+        "description": "Ack for clear_structure_source.",
+        "fields": {}
+      },
+      "structure_failed": {
+        "binary_follow": false,
+        "description": "Failure ack for any set_structure_* path, and the notice emitted when a swap drops a structure override (\"dropped after swap: ...\").",
+        "fields": {
+          "error": {
+            "required": false,
+            "type": "str"
+          }
+        }
+      },
+      "structure_set": {
+        "binary_follow": false,
+        "description": "Ack for set_structure_source / set_structure_fixture.",
+        "fields": {
+          "duration": {
+            "required": true,
+            "type": "float"
+          },
+          "name": {
+            "required": true,
+            "type": "str"
+          }
+        }
+      },
+      "swap_failed": {
+        "binary_follow": false,
+        "description": "Swap rejected (decode/load failure).",
+        "fields": {
+          "build_command": {
+            "description": "Present only when the swap failed on a missing TRT engine: the command to build the profile for the new source's duration.",
+            "required": false,
+            "type": "str"
+          },
+          "error": {
+            "required": false,
+            "type": "str"
+          }
+        }
+      },
+      "swap_ready": {
+        "binary_follow": true,
+        "description": "Swap accepted; a binary float16 replacement buffer follows the JSON.",
+        "fields": {
+          "bpm": {
+            "nullable": true,
+            "required": false,
+            "type": "float"
+          },
+          "channels": {
+            "required": true,
+            "type": "int"
+          },
+          "duration": {
+            "required": true,
+            "type": "float"
+          },
+          "fixture_name": {
+            "nullable": true,
+            "required": false,
+            "type": "str"
+          },
+          "key": {
+            "nullable": true,
+            "required": false,
+            "type": "str"
+          },
+          "sample_rate": {
+            "required": true,
+            "type": "int"
+          },
+          "time_signature": {
+            "nullable": true,
+            "required": false,
+            "type": "str"
+          }
+        }
+      },
+      "timbre_cleared": {
+        "binary_follow": false,
+        "description": "Ack for clear_timbre_source.",
+        "fields": {}
+      },
+      "timbre_failed": {
+        "binary_follow": false,
+        "description": "Failure ack for any set_timbre_* path.",
+        "fields": {
+          "error": {
+            "required": false,
+            "type": "str"
+          }
+        }
+      },
+      "timbre_set": {
+        "binary_follow": false,
+        "description": "Ack for set_timbre_source / set_timbre_fixture.",
+        "fields": {
+          "duration": {
+            "required": true,
+            "type": "float"
+          },
+          "name": {
+            "required": true,
+            "type": "str"
+          }
+        }
+      }
+    },
+    "handshake": {
+      "commands": {
+        "upload_track": {
+          "binary": true,
+          "binary_optional": false,
+          "description": "Init-phase: persist + encode an uploaded track on the pod WITHOUT starting a stream (sent as the FIRST frame in place of the session config). JSON header followed by one binary PCM frame: ``<II`` (channels, samples) then interleaved float32 at 48 kHz. Acked by upload_ok / upload_failed, after which the socket closes.",
+          "fields": {
+            "key": {
+              "description": "Optional key override; forces a re-encode instead of the content-dedup fast path.",
+              "required": false,
+              "type": "str"
+            },
+            "name": {
+              "default": "upload",
+              "description": "Requested track label; deduped server-side.",
+              "required": false,
+              "type": "str"
+            },
+            "time_signature": {
+              "description": "Optional meter override; same effect as key.",
+              "required": false,
+              "type": "str"
+            }
+          },
+          "origin_sensitive": false
+        }
+      },
+      "events": {
+        "upload_failed": {
+          "binary_follow": false,
+          "description": "Init-phase upload failure (decode/encode/persist error).",
+          "fields": {
+            "error": {
+              "required": false,
+              "type": "str"
+            }
+          }
+        },
+        "upload_ok": {
+          "binary_follow": false,
+          "description": "Init-phase ack: the uploaded track was persisted + encoded (or an identical existing one was reused).",
+          "fields": {
+            "bpm": {
+              "required": false,
+              "type": "int"
+            },
+            "duration_s": {
+              "required": false,
+              "type": "float"
+            },
+            "key": {
+              "required": false,
+              "type": "str"
+            },
+            "name": {
+              "description": "Final persisted track name (may differ from the requested name after dedup/uniquify).",
+              "required": true,
+              "type": "str"
+            },
+            "samples": {
+              "required": false,
+              "type": "int"
+            },
+            "time_signature": {
+              "required": false,
+              "type": "str"
+            }
+          }
+        }
+      }
+    },
+    "version": 1
+  },
+  "source": {
+    "commit_date": "2026-06-09T07:49:01-04:00",
+    "ref": "origin/main",
+    "repo": "daydreamlive/DEMON",
+    "sha": "dc06b19fd0678e8cd92ddd93e776798f6f272d2e",
+    "synced_at": "2026-06-10T21:52:18+00:00"
+  },
+  "ui": {
+    "channel_ranges": {
+      "ch13": {
+        "max": 2.0,
+        "min": 0,
+        "reverse": true
+      },
+      "ch14": {
+        "max": 2.3,
+        "min": 0,
+        "reverse": false
+      },
+      "ch19": {
+        "max": 2.5,
+        "min": 0,
+        "reverse": false
+      },
+      "ch23": {
+        "max": 2.45,
+        "min": 0,
+        "reverse": false
+      },
+      "ch29": {
+        "max": 2.0,
+        "min": 0,
+        "reverse": false
+      },
+      "ch56": {
+        "max": 2.0,
+        "min": 0,
+        "reverse": false
+      },
+      "ch_g0": {
+        "max": 2.2,
+        "min": 0,
+        "reverse": false
+      },
+      "ch_g1": {
+        "max": 2.0,
+        "min": 0,
+        "reverse": false
+      },
+      "ch_g2": {
+        "max": 2.3,
+        "min": 0,
+        "reverse": true
+      },
+      "ch_g3": {
+        "max": 2.0,
+        "min": 0,
+        "reverse": false
+      },
+      "ch_g4": {
+        "max": 2.5,
+        "min": 0,
+        "reverse": false
+      },
+      "ch_g5": {
+        "max": 2.0,
+        "min": 0,
+        "reverse": false
+      },
+      "ch_g6": {
+        "max": 2.0,
+        "min": 0,
+        "reverse": true
+      },
+      "ch_g7": {
+        "max": 2.0,
+        "min": 0,
+        "reverse": true
+      }
+    },
+    "control_defaults": {
+      "cfg_rescale": 0.0,
+      "ch13": 1.0,
+      "ch14": 1.0,
+      "ch19": 1.0,
+      "ch23": 1.0,
+      "ch29": 1.0,
+      "ch56": 1.0,
+      "ch_g0": 1.0,
+      "ch_g1": 1.0,
+      "ch_g2": 1.0,
+      "ch_g3": 1.0,
+      "ch_g4": 1.0,
+      "ch_g5": 1.0,
+      "ch_g6": 1.0,
+      "ch_g7": 1.0,
+      "dcw_enabled": true,
+      "dcw_high_scaler": 0.02,
+      "dcw_mode": "double",
+      "dcw_scaler": 0.05,
+      "dcw_wavelet": "haar",
+      "denoise": 0.7,
+      "feedback": 0.0,
+      "feedback_depth": 1,
+      "guidance_scale": 2.5,
+      "hint_strength": 1.0,
+      "lora_default_strength": 0.7,
+      "rcfg_mode": "initialize",
+      "seed": 42,
+      "shift": 3.5
+    },
+    "engine_defaults": {
+      "auto_prepend_lora_triggers": true,
+      "crop": 0,
+      "depth": 4,
+      "depth_xl": 2,
+      "enabled_loras": [
+        {
+          "name": "Ambient",
+          "strength": 0.7
+        },
+        {
+          "name": "Deep House",
+          "strength": 0.75
+        }
+      ],
+      "enabled_loras_xl": [
+        {
+          "name": "Funk",
+          "strength": 1.15
+        },
+        {
+          "name": "Trap",
+          "strength": 0.01
+        }
+      ],
+      "fast_vae": false,
+      "key": "G# minor",
+      "lead_ceiling_s": 1.35,
+      "lead_floor_s": 0.25,
+      "lead_release_tau_s": 1.5,
+      "lora": true,
+      "sde": false,
+      "show_incompatible_loras": false,
+      "steps": 8,
+      "time_signature": "4",
+      "vae_window": 0.36,
+      "walk_window": true,
+      "walk_window_s": 60
+    },
+    "labels": {
+      "dcw_high_scaler": "DCW high",
+      "dcw_scaler": "DCW low",
+      "denoise": "strength",
+      "hint_strength": "structure",
+      "timbre_strength": "timbre"
+    },
+    "sources": {
+      "lora_triggers": {
+        "blob_sha": "315d913ff21393bd5d2c4342b78a99f4c0241982",
+        "lines": 112,
+        "path": "demos/realtime_motion_graph_web/web/lib/loraTriggers.ts"
+      },
+      "slider_tile": {
+        "blob_sha": "7aa2a7a163a30b054de71c0589976a60a66f542b",
+        "path": "demos/realtime_motion_graph_web/web/components/Performance/SliderTile.tsx"
+      },
+      "use_start_session": {
+        "blob_sha": "56fef2577f507cff9b31fdc77464e8a5898271a2",
+        "path": "demos/realtime_motion_graph_web/web/hooks/useStartSession.ts"
+      }
+    }
+  }
+}
