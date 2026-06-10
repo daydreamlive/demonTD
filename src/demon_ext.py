@@ -254,6 +254,7 @@ try:
     binary_router_mod = _mod('binary_router')
     session_config_mod = _mod('session_config')
     events_mod = _mod('events')
+    contract_check_mod = _mod('contract_check')
 except NameError:
     import params as P  # type: ignore
     import wire  # type: ignore
@@ -268,6 +269,7 @@ except NameError:
     import binary_router as binary_router_mod  # type: ignore
     import session_config as session_config_mod  # type: ignore
     import events as events_mod  # type: ignore
+    import contract_check as contract_check_mod  # type: ignore
 
 
 # Scheduled-curve helpers. Module-level so they're testable without TD
@@ -413,6 +415,10 @@ class DemonExt:
         self._connected: bool = False
         self._session_id: str | None = None
         self._ws_url: str | None = None
+        # Runtime contract check: which WS generation we've already
+        # checked against the pod's /api/protocol (one check + at most
+        # one drift warning per connection).
+        self._contract_check_gen: int = -1
         self._expires_at_ms: int | None = None
         self._extensions_used: int = 0
         self._playback_pos: int = 0  # samples
@@ -2350,6 +2356,26 @@ class DemonExt:
                     self.log(f"Heartbeat poll failed: {msg}")
                 elif kind == "hb-extend":
                     self._apply_extend_result(payload)
+                elif kind == "contract-drift":
+                    # Runtime contract check result (see
+                    # _spawn_contract_check). Informational only — NEVER
+                    # blocks or tears down the session.
+                    if payload is None:
+                        if self._debug_enabled:
+                            self.log("contract check: skipped (pod has no "
+                                     "/api/protocol, or no vendored "
+                                     "contract next to the .tox)")
+                    elif not payload:
+                        if self._debug_enabled:
+                            self.log("contract check: in sync with pod")
+                    else:
+                        for line in payload:
+                            self.log(f"[contract drift] {line}")
+                        more = (f" (+{len(payload) - 1} more — see "
+                                f"textport)" if len(payload) > 1 else "")
+                        self._set_status(
+                            f"⚠ Protocol drift vs pod: {payload[0]}{more} "
+                            f"— update demonTD")
                 elif kind == "failover-tick":
                     # Failover worker (spawned by _handle_ws_close) is
                     # back on the main thread asking us to re-call the
@@ -2959,6 +2985,32 @@ class DemonExt:
         # client's useInterpSync, which sends the full set on every
         # transition into "ready".
         self._push_interp_methods()
+        self._spawn_contract_check()
+
+    def _spawn_contract_check(self) -> None:
+        """Fire-and-forget runtime drift check: GET the pod's
+        /api/protocol (+/api/knobs) and diff against the contract this
+        build shipped with (vendor/demon_contract.json). One check per
+        WS generation; result marshals back through _inbound as a
+        'contract-drift' event. HTTP off the main thread, same pattern
+        as _leave_worker — a slow pod can't stall the frame loop."""
+        gen = self._ws_gen
+        if self._contract_check_gen == gen:
+            return
+        self._contract_check_gen = gen
+        ws_url = self._ws_url
+        if not ws_url:
+            return
+
+        def _check_worker(u=ws_url, g=gen, vr=_VENDOR_ROOT):
+            try:
+                lines = contract_check_mod.run_check(u, vr)
+            except Exception:
+                lines = None
+            self._inbound.put(("contract-drift", lines, g))
+
+        threading.Thread(target=_check_worker,
+                         name="contract-check", daemon=True).start()
 
     def _ev_lora_catalog(self, kind: str, data: dict) -> None:
         self._apply_lora_catalog(data.get("catalog") or [])
