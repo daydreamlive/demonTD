@@ -348,7 +348,7 @@ def eval_curve_linear(pts: list[tuple[float, float]], t: float) -> float:
 
 # Bump this on every meaningful change so the user can confirm at boot
 # which build is actually loaded. Visible on the "DemonExt initialized" line.
-BUILD_MARKER = "v0.2.17-contract-parity+noprereadyparams"
+BUILD_MARKER = "v0.2.17-contract-parity+vstdefaults+quietlogs"
 
 # Hosted-mode pod failover cap. When a hosted WS opens but never reaches
 # `ready` (1011 keepalive / overloaded pod / etc.), we leave the dead
@@ -710,7 +710,7 @@ class DemonExt:
                 self._write_par("Queueposition", 0)
                 self._write_par("Expiresin", 0.0)
                 self._write_par("Denyreason", "")
-                self._set_status(f"Connecting to {ws_url}...")
+                self._set_status(f"Connecting to {ws_url.split('?', 1)[0]}...")
                 self._open_ws(ws_url)
                 return True
 
@@ -2193,8 +2193,8 @@ class DemonExt:
         self._pending_audio = wire.encode_audio_frame(pcm, channels=2)
         self._pending_source_label = source_label
         self._pending_audio_samples = pcm.shape[1]
-        self.log(f"_open_ws: pending {pcm.shape[1]} samples "
-                 f"({pcm.shape[1] / wire.SAMPLE_RATE:.2f}s) from {source_label}")
+        self._dlog(f"_open_ws: pending {pcm.shape[1]} samples "
+                   f"({pcm.shape[1] / wire.SAMPLE_RATE:.2f}s) from {source_label}")
         # Optional debug: dump the EXACT PCM we're about to encode + send
         # so a user can verify on disk what's leaving the client. Behind
         # the Debug toggle so the .tox doesn't write to /tmp every Connect.
@@ -2243,7 +2243,8 @@ class DemonExt:
                 os.path.join(DEBUG_DUMP_DIR, name), pcm, ch),
         )
 
-        self._set_status(f"Opening {ws_url}...")
+        # Host only — the URL query carries a signed session token.
+        self._set_status(f"Opening {ws_url.split('?', 1)[0]}...")
         # New connection generation — events from older generations'
         # recv threads are dropped in _drain_inbound (see _ws_gen).
         self._ws_gen += 1
@@ -2259,10 +2260,10 @@ class DemonExt:
                 timeout=30.0,
             )
             self._wsc.connect()
-            self.log(f"_open_ws: WSClient.connect() scheduled (thread starting)")
+            self._dlog("_open_ws: WSClient.connect() scheduled (thread starting)")
             # Start the params pacer — it no-ops (build_message → None)
-            # until _connected flips True on open, then streams the
-            # keepalive every ~16 ms regardless of TD frame hitches.
+            # until _saw_ready, then streams the keepalive every ~16 ms
+            # regardless of TD frame hitches.
             self._ensure_pacer()
         except Exception as e:
             self.log(f"_open_ws: WSClient construct/connect failed: {e}")
@@ -2347,7 +2348,7 @@ class DemonExt:
                 continue
             try:
                 if kind == "open":
-                    self.log("[ws_client] open — flushing config + audio")
+                    self._dlog("[ws_client] open — flushing config + audio")
                     self._flush_pending()
                 elif kind == "text":
                     if self._debug_enabled:
@@ -2506,10 +2507,7 @@ class DemonExt:
     def OnWsConnect(self, dat) -> None:
         """Called by the callbacks DAT's onConnect. We held back the config
         + source-audio frames until the socket was actually open."""
-        try:
-            self.log(f"OnWsConnect: ws connected ({dat.par.netaddress.eval()})")
-        except Exception:
-            self.log("OnWsConnect: ws connected")
+        self._dlog("OnWsConnect: ws connected")
         self._flush_pending()
 
     def _flush_pending(self) -> None:
@@ -2527,11 +2525,7 @@ class DemonExt:
         # the source of truth via SessionConfig.enabled_loras. No reset
         # needed.
         self._lora_catalog_sig = None
-        self.log("_flush_pending: sending config + audio")
-        try:
-            self.log(f"_flush_pending: config = {cfg}")
-        except Exception:
-            pass
+        self._dlog(f"_flush_pending: sending config + audio  config={cfg}")
         self._send_text(cfg)
         self._send_bytes(audio)
         self._connected = True
@@ -3310,6 +3304,10 @@ class DemonExt:
                 self._lora_par_to_id[toggle_name] = lid
                 self._lora_par_to_id[strength_name] = lid
 
+                # Auto-enable the rtmg-vst's default LoRAs on first
+                # creation only (TD persists the toggle thereafter, so a
+                # user OFF + save sticks). Everything else defaults OFF.
+                default_on = lid in P.DEFAULT_ENABLED_LORAS
                 if toggle_name not in existing:
                     try:
                         tp = page.appendToggle(
@@ -3318,12 +3316,8 @@ class DemonExt:
                         )
                         if tp is not None:
                             try:
-                                # All new toggles default to OFF. User
-                                # opts-in per LoRA; this is the only way
-                                # to consistently respect user choice
-                                # across sessions.
-                                tp[0].default = False
-                                tp[0].val = False
+                                tp[0].default = default_on
+                                tp[0].val = default_on
                             except Exception:
                                 pass
                         n_added += 1
@@ -3343,13 +3337,16 @@ class DemonExt:
                                 sp[0].normMax = 1.8
                                 sp[0].clampMin = True
                                 sp[0].clampMax = True
-                                # Honor the catalog's reported strength,
-                                # falling back to 1.0. The server's
-                                # "strength 0 before loaded" quirk no
-                                # longer matters since we send strength
-                                # explicitly with each enable_lora.
-                                default_strength = float(
-                                    entry.get("strength", 1.0))
+                                # Auto-enabled defaults take the vst's
+                                # 0.8; otherwise honor the catalog's
+                                # reported strength, falling back to 1.0.
+                                # (The server's "strength 0 before loaded"
+                                # quirk no longer matters — we send
+                                # strength explicitly with each enable.)
+                                default_strength = (
+                                    P.DEFAULT_ENABLED_LORAS[lid]
+                                    if default_on
+                                    else float(entry.get("strength", 1.0)))
                                 sp[0].default = default_strength
                                 sp[0].val = default_strength
                             except Exception:
@@ -3358,8 +3355,8 @@ class DemonExt:
                     except Exception as e:
                         self.log(f"LoRA float {strength_name} failed: "
                                  f"{type(e).__name__}: {e}")
-            self.log(f"LoRA page: added {n_added} pars for "
-                     f"{len(catalog)} LoRAs")
+            self._dlog(f"LoRA page: added {n_added} pars for "
+                       f"{len(catalog)} LoRAs")
         except Exception as e:
             self.log(f"LoRA page update failed: {type(e).__name__}: {e}")
         # Now that the dynamic Loraenable* pars exist, sync the pacer
@@ -3751,7 +3748,7 @@ class DemonExt:
                     self._send_text(wire.encode_set_timbre_strength(value))
             except Exception as e:
                 self.log(f"seed {wn} send failed: {e}")
-        self.log(
+        self._dlog(
             f"seeded {seeded} continuous params into _dirty for first tick"
             f" (+{len(dedicated_sends)} dedicated)")
 
@@ -3899,6 +3896,12 @@ class DemonExt:
         except Exception:
             pass
 
+    def _dlog(self, msg: str) -> None:
+        """Verbose log — only prints when Debug Logging is on. For the
+        handshake/lifecycle play-by-play that's noise in normal use."""
+        if getattr(self, "_debug_enabled", False):
+            self.log(msg)
+
     # -------- script CHOP cook hooks ----------------------------------------
     # These are called from the script_send / audio_out Script CHOPs.
 
@@ -3927,8 +3930,8 @@ class DemonExt:
         self._n_cook_recv = getattr(self, "_n_cook_recv", 0) + 1
         if self._n_cook_recv == 1:
             try:
-                self.log(f"OnCookRecv: FIRST cook — numSamples="
-                         f"{scriptOp.numSamples} loop_frames={self._ring.frames}")
+                self._dlog(f"OnCookRecv: FIRST cook — numSamples="
+                           f"{scriptOp.numSamples} loop_frames={self._ring.frames}")
             except Exception:
                 pass
         # Cook-rate diagnostic (Debug-gated, throttled). THE signal for

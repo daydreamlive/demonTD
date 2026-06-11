@@ -38,9 +38,13 @@
     "sde_amp": "TD has no SDE-mode knob swap; the Denoise par streams `denoise` in both modes and the server ignores it under SDE."
   },
   "td_extra_knobs": {},
-  "knob_overrides": {},
+  "knob_overrides": {
+    "denoise": {"fields": ["default"], "why": "demonTD ships the rtmg-vst operator default (0.9 Strength), not the web installation's config.json starting value (0.7). The VST is demonTD's canonical out-of-box sound."},
+    "hint_strength": {"fields": ["default"], "why": "demonTD ships the rtmg-vst Structure default (0.8), not the web config.json value (1.0). Matches the VST's known-good musical start."},
+    "seed": {"fields": ["default"], "why": "demonTD ships the rtmg-vst default seed (0); the web installation seeds 42. Arbitrary starting seed — the VST is canonical."}
+  },
   "config_default_overrides": {
-    "prompt": "TD ships its own demo prompt (dubstep) as the Init prompt; the web installation seeds prompts from config.json `prompts`, not `engine`, so there is no single canonical starting prompt to pin to."
+    "prompt": "TD ships the rtmg-vst starting prompt A (\"acoustic deep house hybrid\"); the web installation seeds prompts from config.json `prompts`, not `engine`, so there is no single canonical starting prompt to pin to."
   },
   "label_overrides": {},
   "lora_triggers_reviewed": {

@@ -204,10 +204,10 @@ INIT_PARAMS: list[Param] = [
           min=1.0, max=240.0, clamp_min=True, order=90,
           label="Walk Window (s)", help="Walk window duration in seconds."),
     Param("Initprompt", "prompt", "Init", "Str", "init",
-          default="heavy dubstep, deathstep, afxdump, growl heavy bass distortion",
+          default="acoustic deep house hybrid",
           order=100, multiline=True, label="Initial Prompt",
           help="Text prompt at session start (changeable later via Send Prompt). "
-               "Default matches demon-public-demo."),
+               "Default matches the rtmg-vst starting prompt A."),
     # NOTE: There is no `Initpromptb` companion to `Initprompt`. The
     # canonical has one source of truth for the secondary prompt — the
     # live `Promptb` on the Prompt+LoRA page. `_build_session_config`
@@ -272,7 +272,8 @@ PROMPT_LORA_PARAMS: list[Param] = [
           help="Tags or freeform text to apply on Send Prompt. With "
                "Prompt B set, Prompt Blend lerps between this (A, 0) "
                "and Prompt B (1)."),
-    Param("Promptb", None, "Prompt+LoRA", "Str", "session", default="",
+    Param("Promptb", None, "Prompt+LoRA", "Str", "session",
+          default="daft punk style, beautiful, four to the floor, angelic",
           order=22, multiline=True, label="Prompt B (Tags B)",
           help="Optional secondary prompt for blending. When set, "
                "Prompt Blend lerps between Prompt (A, 0) and this (B, 1). "
@@ -352,19 +353,18 @@ SYNTHESIS_PARAMS: list[Param] = [
     # — users perceive this knob as "how strong is the remix", not as
     # a diffusion-process knob. See DISPLAY_NAMES in
     # demon-public-demo/vendor/demon-ui/components/Performance/SliderTile.tsx.
-    Param("Denoise", "denoise", "Synthesis", "Float", "continuous", default=0.7,
+    Param("Denoise", "denoise", "Synthesis", "Float", "continuous", default=0.9,
           min=0.0, max=1.0, clamp_min=True, clamp_max=True, order=10,
           label="Strength",
           help="How strong the remix is — at 0 the model echoes the source "
                "faithfully, at 1 it's free to depart fully. The canonical "
                "name is `denoise` (diffusion-process internal), but the user "
                "perceives this as 'strength of the transformation'."),
-    # Generation seed. The reference web client uses an arbitrary uint32
-    # (config.json default 42, with a "dice" button to randomize) — NOT a
-    # normalized 0..1 value, which is what this used to (wrongly) be. We
-    # cap at int32 max to stay safely inside TD's numeric-par range; that's
-    # still ~2.1 billion seeds. Streamed continuously like the web client.
-    Param("Seed", "seed", "Synthesis", "Int", "continuous", default=42,
+    # Generation seed — an arbitrary uint32 with a "dice" to randomize,
+    # NOT a normalized 0..1 value. We cap at int32 max to stay inside TD's
+    # numeric-par range (~2.1 billion seeds). Default 0 matches the
+    # rtmg-vst (the web installation seeds 42; the VST is our canonical).
+    Param("Seed", "seed", "Synthesis", "Int", "continuous", default=0,
           min=0, max=2147483647, clamp_min=True, clamp_max=True, order=20,
           label="Seed",
           help="Generation seed — an arbitrary integer. Pulse Randomize "
@@ -388,14 +388,14 @@ SYNTHESIS_PARAMS: list[Param] = [
     # rhythm / dynamics — i.e. its structure. Keep the Param `name` as
     # `Hintstrength` so the wire mapping is unchanged.
     Param("Hintstrength", "hint_strength", "Synthesis", "Float", "continuous",
-          default=1.0, min=0.0, max=1.0, clamp_min=True, clamp_max=True,
+          default=0.8, min=0.0, max=1.0, clamp_min=True, clamp_max=True,
           order=50, label="Structure",
           help="How closely the model follows the original song's structure "
                "— sections, rhythm, dynamics. Crank it up to keep the "
                "arrangement intact; drop it to let the model rearrange "
                "more freely. (wire: hint_strength)"),
     Param("Timbrestrength", "timbre_strength", "Synthesis", "Float", "continuous",
-          default=1.0, min=0.0, max=1.0, clamp_min=True, clamp_max=True,
+          default=0.3, min=0.0, max=1.0, clamp_min=True, clamp_max=True,
           order=60, label="Timbre Strength",
           help="Source vs generation timbre blend (rides own WS message)."),
     Param("Guidancescale", "guidance_scale", "Synthesis", "Float", "continuous",
@@ -702,6 +702,21 @@ DISCRETE_PULSE_TO_KIND: dict[str, str] = {
     "Setstructuresource": "set_structure_source",
     "Clearstructuresource": "clear_structure_source",
     "Setstructurefixture": "set_structure_fixture",
+}
+
+
+# -----------------------------------------------------------------------------
+# Default-enabled LoRAs
+# -----------------------------------------------------------------------------
+# {lora_id: strength} auto-enabled on FIRST catalog load, matching the
+# rtmg-vst's default slot selection (loraSel1/loraSel2 @ 0.8). Only
+# applied when the `Loraenable<id>` toggle is first created — once it
+# exists, TD persists the user's choice across sessions, so toggling one
+# of these OFF and saving sticks. Ids must match the server catalog;
+# a miss just means no auto-enable (harmless).
+DEFAULT_ENABLED_LORAS: dict[str, float] = {
+    "ambient-v1": 0.8,
+    "deep_house-v1": 0.8,
 }
 
 
