@@ -408,3 +408,31 @@ def test_write_channel_count_read_under_lock():
     got = loop.peek(100, position=0)
     assert got.shape[0] == 1
     np.testing.assert_allclose(got[0], 0.25, atol=1e-6)
+
+
+def test_playhead_estimate_before_any_read_is_position():
+    import numpy as np
+    lb = audio_mod.LoopBuffer(channels=1, sample_rate=48000, seam_seconds=0.0)
+    lb.init(np.zeros((1, 48000), dtype=np.float32))
+    # No read yet → estimate falls back to raw position.
+    assert lb.playhead_estimate() == lb.position
+
+
+def test_playhead_estimate_is_mean_neutral_and_bounded():
+    import numpy as np
+    lb = audio_mod.LoopBuffer(channels=1, sample_rate=48000, seam_seconds=0.0)
+    lb.init(np.zeros((1, 48000), dtype=np.float32))
+    out = np.zeros((1, 4096), dtype=np.float32)
+    lb.read_into(out)
+    pos = lb.position
+    block = 4096
+    # Immediately after a read, the centered ramp sits at -half a block;
+    # it never exceeds +half a block past `position` (the cap).
+    est0 = lb.playhead_estimate()
+    assert pos - block // 2 - 1 <= est0 <= pos + block // 2 + 1
+    # Estimate is monotonic-ish and bounded as wall-clock elapses.
+    import time as _t
+    _t.sleep(0.02)
+    est1 = lb.playhead_estimate()
+    assert est1 >= est0
+    assert est1 <= pos + block // 2 + 1   # capped, never runs away

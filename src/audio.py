@@ -56,6 +56,19 @@ class LoopBuffer:
         self._frames: int = 0
         self._position: int = 0  # next read frame
         self._lock = threading.Lock()
+        # Playhead-estimate state. `_position` only advances in ~85 ms
+        # jumps (one PortAudio callback), so reporting it raw to the pod
+        # as `playback_pos` is a stair-step lagging the true playhead by
+        # up to a full block. The pod places each slice's leading edge at
+        # the reported position, so a stale position lands fresh audio
+        # BEHIND the playhead → an un-patched gap (the "random source
+        # flash"). `playhead_estimate()` smooths the stair-step by adding
+        # the wall-clock elapsed since the last read, so the pod tracks a
+        # continuous realtime playhead — same mean latency, just de-
+        # jittered. The webapp gets this for free from its 5 ms worklet;
+        # we reconstruct it on top of the coarse 85 ms callback.
+        self._last_read_t: float = 0.0       # monotonic at last read
+        self._last_read_nframes: int = 0     # block size of last read (cap)
         # Slice-coverage tracking (diagnostic for the "random source
         # flashes during playback" reports). One bool per ~1s chunk of
         # the loop; flipped to True the first time a slice patches that
@@ -116,6 +129,38 @@ class LoopBuffer:
         """Current playback position in frames (per channel)."""
         with self._lock:
             return self._position
+
+    def playhead_estimate(self) -> int:
+        """`position` smoothed to the current instant — what to report to
+        the pod as `playback_pos`.
+
+        `_position` jumps once per ~85 ms PortAudio callback; between
+        callbacks the true playhead keeps moving, so reporting `_position`
+        raw is a stale stair-step. We replace the step with a smooth ramp
+        driven by wall-clock elapsed since the last read.
+
+        MEAN-NEUTRAL by design: the ramp is CENTERED on `_position`
+        (−half a block to +half a block), so the time-average reported
+        position is unchanged from reporting `_position` directly. This
+        removes the jitter that misplaces a slice's leading edge (the
+        gap/"source flash" contributor) WITHOUT pushing the playhead
+        forward — i.e. zero added param-to-ear latency. The half-block
+        offsets are tiny (~±42 ms) next to the pod's ~250 ms lead, so the
+        momentary dip below `_position` is harmless (still well ahead of
+        the audible playhead, which trails the read cursor by the output
+        latency). Capped so a stopped audio thread can't run away.
+        """
+        with self._lock:
+            pos = self._position
+            block = self._last_read_nframes
+            if self._last_read_t <= 0.0 or self._frames == 0 or block <= 0:
+                return pos
+            elapsed = time.monotonic() - self._last_read_t
+            half = block // 2
+            # ramp 0..block over one callback period, centered: -half..+half
+            ramp = int(elapsed * self._sample_rate)
+            offset = min(ramp, block) - half
+            return pos + offset
 
     @property
     def available(self) -> int:
@@ -460,6 +505,12 @@ class LoopBuffer:
                         pos = seam if seam > 0 else 0
 
             self._position = pos
+            # Anchor the playhead estimate to this read (see
+            # playhead_estimate): wall-clock now + the block size we just
+            # consumed, so the reported playback_pos advances smoothly
+            # between these ~85 ms callbacks instead of stair-stepping.
+            self._last_read_t = time.monotonic()
+            self._last_read_nframes = num_frames
 
     def peek(self, num_frames: int,
              position: int | None = None) -> np.ndarray:

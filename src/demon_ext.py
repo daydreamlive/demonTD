@@ -348,7 +348,7 @@ def eval_curve_linear(pts: list[tuple[float, float]], t: float) -> float:
 
 # Bump this on every meaningful change so the user can confirm at boot
 # which build is actually loaded. Visible on the "DemonExt initialized" line.
-BUILD_MARKER = "v0.2.17-contract-parity+vstdefaults+quietlogs"
+BUILD_MARKER = "v0.2.17-contract-parity+freshplayhead"
 
 # Hosted-mode pod failover cap. When a hosted WS opens but never reaches
 # `ready` (1011 keepalive / overloaded pod / etc.), we leave the dead
@@ -1991,9 +1991,14 @@ class DemonExt:
                 self._dirty.clear()
             raw = dict(self._params_snapshot)
         raw = P.filter_params_for_wire(raw, self._enabled_loras_cache)
-        # The LoopBuffer's actual read position (in seconds) — mirrors
-        # demon-public-demo's session.player.positionSec.
-        playback_sec = self._ring.position / wire.SAMPLE_RATE
+        # Smoothed playhead (wall-clock-interpolated between the coarse
+        # ~85 ms audio callbacks) — mirrors demon-public-demo's
+        # session.player.positionSec, which is fresh every 5 ms. A stale
+        # stair-stepped position makes the pod land slice leading edges
+        # behind the playhead → un-patched "source flash" gaps. Sent
+        # EVERY tick regardless of whether any knob changed, so the pod's
+        # decode placement tracks realtime even when the operator is idle.
+        playback_sec = self._ring.playhead_estimate() / wire.SAMPLE_RATE
         return wire.encode_params(raw, playback_sec)
 
     def _pacer_send(self, msg: str) -> bool:
