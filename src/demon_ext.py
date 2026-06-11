@@ -348,7 +348,13 @@ def eval_curve_linear(pts: list[tuple[float, float]], t: float) -> float:
 
 # Bump this on every meaningful change so the user can confirm at boot
 # which build is actually loaded. Visible on the "DemonExt initialized" line.
-BUILD_MARKER = "v0.2.17-contract-parity+freshplayhead"
+BUILD_MARKER = "v0.2.17-contract-parity+freshplayhead+lorastrdebounce"
+
+# LoRA-strength debounce (see _flush_lora_strength_debounce). Match the
+# rtmg-vst: only the value a gesture SETTLES on reaches the wire, so a
+# fader drag / MIDI sweep doesn't refit-storm the pod's decode loop.
+_LORA_STR_QUIET_S = 0.3      # commit after this much quiet (vst: 300 ms)
+_LORA_STR_DELTA = 0.004      # ignore sub-threshold jitter (vst: 0.004)
 
 # Hosted-mode pod failover cap. When a hosted WS opens but never reaches
 # `ready` (1011 keepalive / overloaded pod / etc.), we leave the dead
@@ -569,6 +575,17 @@ class DemonExt:
         self._pacer = None  # params_pacer_mod.ParamsPacer
         self._enabled_loras_cache: frozenset = frozenset()
         self._last_pacer_warn_t: float = 0.0
+        # LoRA-strength debounce (trailing-edge, matches rtmg-vst's
+        # advanceLoraStrengthDebounce). A strength delta >~0.004 costs the
+        # pod a weight REFIT that BLOCKS a decode tick — so streaming every
+        # intermediate fader value (drag / MIDI / automation) is a refit
+        # storm that stalls the decode frontier and makes the playhead
+        # read un-patched source ("more in TD" than the VST, which only
+        # ever sends the value a gesture SETTLES on). We hold the latest
+        # value here and only commit it to the wire once it's been quiet
+        # for _LORA_STR_QUIET_S. {lora_id: (pending_value, last_move_t)}.
+        self._lora_str_pending: dict[str, tuple[float, float]] = {}
+        self._lora_str_committed: dict[str, float] = {}
 
         # Inbound message queue — populated by the WS recv thread, drained
         # on the main TD thread (OnTick / 8 ms timer). TD forbids touching
@@ -696,6 +713,10 @@ class DemonExt:
             self._params_snapshot = {}
             self._last_tick_t = 0.0
             self._send_fail_streak = 0
+            # Drop any half-settled LoRA-strength gesture from a prior
+            # session; committed values re-seed on enable.
+            self._lora_str_pending.clear()
+            self._lora_str_committed.clear()
             # Sync the pacer thread's LoRA-filter cache to the current
             # toggle state before any params flow.
             self._refresh_enabled_loras_cache()
@@ -1468,6 +1489,11 @@ class DemonExt:
                         safe = self._lora_par_safe(lora_id)
                         sp = self._par_by_name(f"Lorastr{safe}")
                         strength = float(sp.eval()) if sp is not None else 1.0
+                        # Seed the debounce committed-value so the
+                        # enable's strength isn't immediately re-sent as
+                        # a "change" by the next fader tick.
+                        self._lora_str_committed[lora_id] = strength
+                        self._lora_str_pending.pop(lora_id, None)
                         if self._connected:
                             self._send_text(wire.encode_enable_lora(
                                 lora_id, strength=strength))
@@ -1497,11 +1523,15 @@ class DemonExt:
                     # currently enabled; otherwise the filter would
                     # strip it from the params message anyway and the
                     # server would have no LoRA to apply it to.
+                    # DEBOUNCED: record the latest value + move time and
+                    # let _flush_lora_strength_debounce commit it once
+                    # the fader settles — a live drag/automation would
+                    # otherwise refit-storm the pod (one refit per delta
+                    # >~0.004 at 60 fps) and stall the decode frontier.
                     enabled_set = set(self._enabled_loras())
                     if lora_id in enabled_set:
-                        value = float(par.eval())
-                        with self._lock:
-                            self._dirty[f"lora_str_{lora_id}"] = value
+                        self._lora_str_pending[lora_id] = (
+                            float(par.eval()), time.monotonic())
             except Exception as e:
                 self.log(f"OnParChange({name}) lora-route raised: {e}")
             return
@@ -2037,6 +2067,33 @@ class DemonExt:
         if self._debug_enabled:
             self.log("[pacer] params pacer thread started")
 
+    def _flush_lora_strength_debounce(self, now: float | None = None) -> None:
+        """Commit settled LoRA strengths to the params stream. Called once
+        per frame from _drain_inbound (main thread).
+
+        Trailing-edge: a value reaches `_dirty` (and thus the wire) only
+        after it's been quiet for _LORA_STR_QUIET_S and differs from the
+        last committed value by > _LORA_STR_DELTA — so a fader gesture
+        costs the pod ONE weight refit, not one per frame. Mirrors the
+        rtmg-vst's advanceLoraStrengthDebounce."""
+        if not self._lora_str_pending:
+            return
+        if now is None:
+            now = time.monotonic()
+        committed = P.settled_lora_strengths(
+            self._lora_str_pending, self._lora_str_committed, now,
+            _LORA_STR_QUIET_S, _LORA_STR_DELTA)
+        for lid, val in committed:
+            with self._lock:
+                self._dirty[f"lora_str_{lid}"] = val
+            self._lora_str_committed[lid] = val
+            self._lora_str_pending.pop(lid, None)
+        # Settled-but-unchanged entries (drifted back under the delta)
+        # still clear so they don't linger.
+        for lid in [k for k, (_v, t) in self._lora_str_pending.items()
+                    if now - t >= _LORA_STR_QUIET_S]:
+            self._lora_str_pending.pop(lid, None)
+
     def _refresh_enabled_loras_cache(self) -> None:
         """Re-read the Loraenable* pars (main thread!) into the plain
         frozenset the pacer thread filters against. Call after anything
@@ -2432,6 +2489,9 @@ class DemonExt:
         #   * sends failing repeatedly → socket is dead; tear down once
         #     (the pacer itself must never call Disconnect — TD pars).
         if self._connected:
+            # Commit any settled LoRA-strength gesture (debounced so a
+            # live drag doesn't refit-storm the pod — see the method).
+            self._flush_lora_strength_debounce()
             pacer = self._pacer
             if pacer is None or not pacer.is_alive:
                 self.log("[pacer] thread not running — restarting")

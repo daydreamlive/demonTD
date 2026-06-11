@@ -71,3 +71,40 @@ def test_param_count_in_expected_ballpark():
     """Sanity check that the schema is roughly the size we claimed."""
     # 12 session + 11 init + ~6 prompt/lora + 24 synthesis + 10 rcfg/dcw + 5 curves + 10 sources
     assert 60 <= len(P.PARAMS) <= 120
+
+
+# ---------------------------------------------------------------------------
+# LoRA-strength debounce (settled_lora_strengths) — refit-storm guard
+# ---------------------------------------------------------------------------
+
+def test_settled_lora_strengths_waits_for_quiet():
+    # Just moved (t == now) → not settled yet, nothing committed.
+    pending = {"ambient-v1": (0.8, 100.0)}
+    out = P.settled_lora_strengths(pending, {}, now=100.1,
+                                        quiet_s=0.3, delta=0.004)
+    assert out == []
+
+
+def test_settled_lora_strengths_commits_after_quiet():
+    pending = {"ambient-v1": (0.8, 100.0)}
+    out = P.settled_lora_strengths(pending, {}, now=100.4,
+                                        quiet_s=0.3, delta=0.004)
+    assert out == [("ambient-v1", 0.8)]
+
+
+def test_settled_lora_strengths_skips_subdelta_change():
+    # Settled, but barely moved from the committed value → no refit.
+    pending = {"ambient-v1": (0.801, 100.0)}
+    out = P.settled_lora_strengths(
+        pending, {"ambient-v1": 0.8}, now=100.4, quiet_s=0.3, delta=0.004)
+    assert out == []
+
+
+def test_settled_lora_strengths_only_settled_entries():
+    pending = {
+        "a": (0.5, 100.0),    # settled
+        "b": (0.9, 100.25),   # still moving at now=100.4 (quiet 0.3)
+    }
+    out = P.settled_lora_strengths(pending, {}, now=100.4,
+                                        quiet_s=0.3, delta=0.004)
+    assert out == [("a", 0.5)]

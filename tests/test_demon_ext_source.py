@@ -78,6 +78,21 @@ def test_params_not_streamed_before_ready():
         "otherwise it floods the encoding pod pre-`ready` and gets 1011'd")
 
 
+def test_lora_strength_is_debounced_not_streamed_raw():
+    """LoRA-strength fader changes must go through the debounce
+    (_lora_str_pending), NOT straight into _dirty — streaming every
+    intermediate value refit-storms the pod and stalls the decode
+    frontier (the 'source flash', worse in TD than the VST)."""
+    # The Lorastr branch records pending, and the per-frame flush is wired.
+    assert "_lora_str_pending[lora_id] = (" in SRC, (
+        "Lorastr OnParChange must record a debounce-pending value")
+    assert "_flush_lora_strength_debounce()" in SRC, (
+        "_drain_inbound must call the LoRA-strength debounce flush")
+    # And it must NOT dirty lora_str directly from the fader handler.
+    assert 'self._dirty[f"lora_str_{lora_id}"] = value' not in SRC, (
+        "raw lora_str streaming reintroduced — must debounce instead")
+
+
 def test_build_tox_ships_every_module_demon_ext_imports():
     """Inside TD, demon_ext resolves siblings via mod('<name>'), which
     only works for modules build_tox.py synced into Text DATs. A module

@@ -740,6 +740,33 @@ PARAMS_NOT_FOR_WIRE: frozenset[str] = frozenset({
 })
 
 
+def settled_lora_strengths(
+    pending: "dict[str, tuple[float, float]]",
+    committed: "dict[str, float]",
+    now: float,
+    quiet_s: float,
+    delta: float,
+) -> list[tuple[str, float]]:
+    """Trailing-edge LoRA-strength debounce decision (pure).
+
+    `pending` maps lora_id -> (latest_value, last_move_monotonic). Returns
+    [(lora_id, value)] for every entry that has been quiet for `quiet_s`
+    AND differs from its last `committed` value by more than `delta` —
+    i.e. the values a gesture has SETTLED on and that are worth the pod's
+    one weight refit. Entries still moving (quiet < quiet_s) are left for
+    a later call. Mirrors rtmg-vst advanceLoraStrengthDebounce; kept pure
+    (no TD, no lock) so it's unit-testable.
+    """
+    out: list[tuple[str, float]] = []
+    for lid, (val, t) in pending.items():
+        if now - t < quiet_s:
+            continue
+        prev = committed.get(lid)
+        if prev is None or abs(prev - val) > delta:
+            out.append((lid, val))
+    return out
+
+
 def filter_params_for_wire(raw: dict[str, Any],
                            enabled_loras: "frozenset[str] | set[str]",
                            ) -> dict[str, Any]:
