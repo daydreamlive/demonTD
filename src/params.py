@@ -192,8 +192,14 @@ INIT_PARAMS: list[Param] = [
     Param("Fastvae", "fast_vae", "Init", "Toggle", "init", default=False, order=70,
           label="Fast VAE", help="Use dreamvae distilled decoder (TensorRT only). "
                                   "Off matches demon-public-demo default."),
-    Param("Walkwindow", "walk_window", "Init", "Toggle", "init", default=False, order=80,
-          label="Walk Window", help="For long sources, use 60s engine at boundaries."),
+    # Default True = web installation parity (config.json engine). With
+    # this OFF, a >60s source pushes its full-length latent through the
+    # DiT every tick — a heavyweight path the webapp never exercises,
+    # observed to starve the pod hard enough that its WS keepalive
+    # times out (1011) right around the initial encode.
+    Param("Walkwindow", "walk_window", "Init", "Toggle", "init", default=True, order=80,
+          label="Walk Window", help="For long sources, cut into 60s windows "
+                                    "and swap at boundaries (web default)."),
     Param("Walkwindows", "walk_window_s", "Init", "Float", "init", default=60.0,
           min=1.0, max=240.0, clamp_min=True, order=90,
           label="Walk Window (s)", help="Walk window duration in seconds."),

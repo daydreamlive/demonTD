@@ -40,8 +40,7 @@
   "td_extra_knobs": {},
   "knob_overrides": {},
   "config_default_overrides": {
-    "prompt": "TD ships its own demo prompt (dubstep) as the Init prompt; the web installation seeds prompts from config.json `prompts`, not `engine`, so there is no single canonical starting prompt to pin to.",
-    "walk_window": "TD default False matches the SessionConfig dataclass default; the web installation ships true in config.json for long-source routing. TD users opt in per-session."
+    "prompt": "TD ships its own demo prompt (dubstep) as the Init prompt; the web installation seeds prompts from config.json `prompts`, not `engine`, so there is no single canonical starting prompt to pin to."
   },
   "label_overrides": {},
   "lora_triggers_reviewed": {
