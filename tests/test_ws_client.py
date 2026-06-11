@@ -254,3 +254,52 @@ def test_server_close_mid_upload_aborts_send():
     assert c._server_close_code == 1011
     # Upload stopped early — far fewer frames than the full payload.
     assert len(c._ws.frames) < 3
+
+
+# ---------------------------------------------------------------------------
+# Write-readiness gate (don't wedge the recv thread when the pod stalls)
+# ---------------------------------------------------------------------------
+
+def test_flush_defers_when_socket_not_writable():
+    c = _make_client()
+    c._socket_writable = lambda: False  # pod momentarily not reading
+    c.send_text("p1")
+    c.send_text("p2")
+    err = c._flush_outbound()
+    # Nothing went out, the in-hand frame is held, the loop returns
+    # promptly (so the caller can go answer pings) — no error.
+    assert err is None
+    assert c._ws.sent == []
+    assert c._pending_send == (websocket.ABNF.OPCODE_TEXT, "p1")
+
+
+def test_deferred_frame_sent_first_when_writable_again():
+    c = _make_client()
+    c._socket_writable = lambda: False
+    c.send_text("p1")
+    c.send_text("p2")
+    c._flush_outbound()              # defers p1
+    c._socket_writable = lambda: True  # pod reading again
+    assert c._flush_outbound() is None
+    # Deferred frame goes first, then the rest — order preserved, none lost.
+    assert [p for p, _ in c._ws.sent] == ["p1", "p2"]
+    assert c._pending_send is None
+
+
+def test_discrete_message_not_dropped_under_backpressure():
+    c = _make_client()
+    c._socket_writable = lambda: False
+    c.send_text('{"type":"enable_lora","id":"bach"}')  # must NOT be dropped
+    c._flush_outbound()
+    assert c._ws.sent == []
+    # Still held for retry, not discarded.
+    assert c._pending_send[1] == '{"type":"enable_lora","id":"bach"}'
+    c._socket_writable = lambda: True
+    c._flush_outbound()
+    assert [p for p, _ in c._ws.sent] == ['{"type":"enable_lora","id":"bach"}']
+
+
+def test_socket_writable_true_when_no_sock():
+    c = wsc_mod.WSClient("ws://test/")
+    c._ws = FakeWS()  # no .sock attribute
+    assert c._socket_writable() is True

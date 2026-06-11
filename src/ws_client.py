@@ -35,6 +35,7 @@ thread via `tdu.Dependency` / `op.cook()` if needed.
 from __future__ import annotations
 
 import queue
+import select
 import threading
 import time
 from typing import Callable
@@ -115,6 +116,11 @@ class WSClient:
         # _dispatch_frame); preferred over websocket-client's
         # close_status_code, which stays None under control_frame=False.
         self._server_close_code: int | None = None
+        # A frame pulled off the queue but deferred because the socket
+        # wasn't write-ready (pod momentarily not reading). Retried at
+        # the front of the next flush so ordering + discrete messages
+        # are never dropped. See _flush_outbound.
+        self._pending_send: tuple[int, bytes | str] | None = None
         # Close code the recv thread should use when it tears the socket
         # down (set by close()). Kept so the actual socket .close() happens
         # on the recv thread — never concurrently with its recv.
@@ -150,6 +156,7 @@ class WSClient:
 
     def _run(self) -> None:
         self._server_close_code = None
+        self._pending_send = None
         try:
             self._log(f"[ws_client] dialing {self.url}")
             self._ws = websocket.create_connection(self.url, timeout=self._timeout)
@@ -418,14 +425,53 @@ class WSClient:
         self._last_recv_t = time.monotonic()
         return self._dispatch_frame(opcode, data)
 
+    def _socket_writable(self) -> bool:
+        """Is the socket's send buffer ready to accept a write right now?
+
+        A 0-timeout select on the underlying fd. False means the pod
+        isn't draining its side (e.g. busy generating the first window
+        of a long source) and the TCP send buffer is full — entering a
+        blocking ws.send() here would wedge this thread for up to
+        `_timeout` (30 s), during which recv_data is never called and
+        the server's keepalive PINGs go unanswered → 1011 / dropped
+        connection. select failing (rare) is treated as writable so we
+        fall through to a normal timed send rather than stalling sends
+        forever."""
+        sock = getattr(self._ws, "sock", None)
+        if sock is None:
+            return True
+        try:
+            _r, wr, _e = select.select([], [sock], [], 0)
+            return bool(wr)
+        except Exception:
+            return True
+
     def _flush_outbound(self) -> str | None:
-        """Send every queued outbound frame. Runs ONLY on the recv thread.
-        Returns a close-reason string on write failure, else None."""
+        """Send queued outbound frames. Runs ONLY on the recv thread.
+        Returns a close-reason string on write failure, else None.
+
+        Bails the moment the socket isn't write-ready, leaving the
+        in-hand frame in `_pending_send` and the rest queued, so the
+        recv loop promptly returns to recv_data and keeps answering the
+        server's keepalive PINGs even while the pod is briefly not
+        reading. This is what lets demonTD ride through a pod that's
+        busy on first-window generation instead of wedging in a 30 s
+        blocking send and getting 1011'd — the disconnect the VST never
+        sees (its transport answers pings on an independent thread)."""
         while True:
-            try:
-                opcode, payload = self._outbound.get_nowait()
-            except queue.Empty:
+            if self._pending_send is not None:
+                opcode, payload = self._pending_send
+            else:
+                try:
+                    opcode, payload = self._outbound.get_nowait()
+                except queue.Empty:
+                    return None
+            if not self._socket_writable():
+                # Defer this frame (don't drop it — could be a prompt /
+                # enable_lora, not a droppable param) and yield to recv.
+                self._pending_send = (opcode, payload)
                 return None
+            self._pending_send = None
             if len(payload) > self._SEND_FRAGMENT_BYTES and opcode in (
                     websocket.ABNF.OPCODE_TEXT,
                     websocket.ABNF.OPCODE_BINARY):
