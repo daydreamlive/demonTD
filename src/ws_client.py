@@ -205,8 +205,27 @@ class WSClient:
         # Recv loop
         close_code: int | None = None
         close_reason: str | None = None
+        # Liveness probe: prove the recv thread is still spinning (and the
+        # socket still writable) during a silent stretch. If these lines
+        # STOP, the recv thread wedged (e.g. in a callback / blocking
+        # send) — that's "we stopped answering pings". If they keep
+        # printing but writable flips to False and stays, the pod stopped
+        # reading us. Diagnostic only; remove once the 1011 is understood.
+        loop_iters = 0
+        last_alive_t = self._connect_t
         try:
             while not self._closing:
+                loop_iters += 1
+                now_iter = time.monotonic()
+                if now_iter - last_alive_t >= 5.0:
+                    last_alive_t = now_iter
+                    self._log(
+                        f"[ws_client] alive iters={loop_iters} "
+                        f"writable={self._socket_writable()} "
+                        f"queued={self._outbound.qsize()} "
+                        f"params_pending={self._latest_params is not None} "
+                        f"sent={self._n_sent} recv={self._n_recv} "
+                        f"since_recv={now_iter - self._last_recv_t:.1f}s")
                 # 1. Flush all queued outbound sends FIRST (same thread as
                 #    recv → no concurrent SSL read/write). Drain fully so a
                 #    burst of param messages goes out promptly.
@@ -233,7 +252,16 @@ class WSClient:
                     close_reason = f"recv error: {type(e).__name__}: {e}"
                     break
 
+                # Time the dispatch — a slow on_binary (the ~23 MB initial
+                # buffer decode) blocks this thread from the next recv, and
+                # thus from auto-ponging, for its whole duration.
+                _t0 = time.monotonic()
                 reason = self._dispatch_frame(opcode, data)
+                _dt = time.monotonic() - _t0
+                if _dt >= 0.3:
+                    self._log(f"[ws_client] slow dispatch {_dt * 1000:.0f}ms "
+                              f"(opcode={opcode}, {len(data)}B) — recv thread "
+                              f"couldn't pong during this")
                 if reason is not None:
                     close_reason = reason
                     break

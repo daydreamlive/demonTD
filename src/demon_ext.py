@@ -348,7 +348,7 @@ def eval_curve_linear(pts: list[tuple[float, float]], t: float) -> float:
 
 # Bump this on every meaningful change so the user can confirm at boot
 # which build is actually loaded. Visible on the "DemonExt initialized" line.
-BUILD_MARKER = "v0.2.17-contract-parity+wsdrain+paramcoalesce-keepalive-fix"
+BUILD_MARKER = "v0.2.17-contract-parity+keepalive-DIAG1"
 
 # Hosted-mode pod failover cap. When a hosted WS opens but never reaches
 # `ready` (1011 keepalive / overloaded pod / etc.), we leave the dead
