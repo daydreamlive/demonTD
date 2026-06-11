@@ -954,6 +954,53 @@
         },
         "origin_sensitive": false,
         "requires": "swap"
+      },
+      "write_audio": {
+        "binary": true,
+        "binary_optional": false,
+        "description": "Write audio onto the live source in place \u2014 the 'play into the model' path, NO song restart / playhead reset / BPM-key detect. The binary PCM frame is ONLY the audio being written (a bar, a chunk, or the whole track): the server keeps a sample-exact mirror of the source audio and pulls all re-encode context from it, so no context margins, window math, or full-loop re-uploads. JSON header followed by one binary PCM frame: ``<II`` (channels, samples) then interleaved float32 at 48 kHz. Acked by audio_written / audio_write_failed.",
+        "fields": {
+          "at_s": {
+            "default": 0.0,
+            "description": "Where the buffer's first sample lands on the source, in playback seconds (sample-exact; no frame or grid alignment required). Default 0. Audio past the source end is trimmed, never wrapped.",
+            "nullable": true,
+            "required": false,
+            "type": "float"
+          },
+          "mix": {
+            "default": "replace",
+            "description": "replace = overwrite the span (declicked against the existing audio at the edges); sum = overdub on top of what's there.",
+            "options": [
+              "replace",
+              "sum"
+            ],
+            "required": false,
+            "type": "enum"
+          },
+          "refresh_timbre": {
+            "description": "Re-encode the self-timbre conditioning against the updated source (~+50 ms). Ignored when a timbre override is active. Default false.",
+            "required": false,
+            "type": "bool"
+          },
+          "repeat": {
+            "default": "none",
+            "description": "fill = treat the buffer as ONE period of a loop and lay it across the whole source, phase-anchored at at_s (sample-exact audio-domain tiling; any period length works). Default none = write once.",
+            "options": [
+              "none",
+              "fill"
+            ],
+            "required": false,
+            "type": "enum"
+          },
+          "source_epoch": {
+            "description": "The source generation this write targets (from ready/swap_ready, bumped by every swap). A mismatch is rejected with audio_write_failed instead of splicing into the wrong source. Omit to write against whatever is live.",
+            "nullable": true,
+            "required": false,
+            "type": "int"
+          }
+        },
+        "origin_sensitive": false,
+        "requires": "write_audio"
       }
     },
     "config": {
@@ -1069,6 +1116,35 @@
       }
     },
     "events": {
+      "audio_write_failed": {
+        "binary_follow": false,
+        "description": "Failure ack for write_audio (stale source_epoch, write past the source end, bad mix/repeat, no encode path).",
+        "fields": {
+          "error": {
+            "required": false,
+            "type": "str"
+          }
+        }
+      },
+      "audio_written": {
+        "binary_follow": false,
+        "description": "Ack for write_audio: the (start_s, end_s) playback span whose latent was refreshed (the written audio plus the encoder's receptive-field margin).",
+        "fields": {
+          "end_s": {
+            "required": true,
+            "type": "float"
+          },
+          "source_epoch": {
+            "description": "The source generation the write landed on (matches ready/swap_ready).",
+            "required": true,
+            "type": "int"
+          },
+          "start_s": {
+            "required": true,
+            "type": "float"
+          }
+        }
+      },
       "command_failed": {
         "binary_follow": false,
         "description": "A `requires`-tagged command was rejected because the session's backend lacks the capability (loud failure, never a silent no-op). The command was NOT applied. With only the acestep backend registered this fires solely for LoRA commands on a lora-disabled session.",
@@ -1288,6 +1364,11 @@
             "required": false,
             "type": "str"
           },
+          "source_epoch": {
+            "description": "Source generation counter (0 at create, bumped by every swap). Echo it in write_audio to pin a write to the source it was computed against.",
+            "required": false,
+            "type": "int"
+          },
           "steering_available": {
             "description": "True when the session's checkpoint has a reachable steering-vector bundle; false hides the steering surface (the steer_*/man_* knobs are absent from the manifest too).",
             "required": false,
@@ -1425,6 +1506,11 @@
             "required": true,
             "type": "int"
           },
+          "source_epoch": {
+            "description": "Source generation counter after this swap; write_audio sends targeting the old source are rejected.",
+            "required": false,
+            "type": "int"
+          },
           "time_signature": {
             "nullable": true,
             "required": false,
@@ -1536,11 +1622,11 @@
     "version": 1
   },
   "source": {
-    "commit_date": "2026-06-09T07:49:01-04:00",
+    "commit_date": "2026-06-11T12:15:48+02:00",
     "ref": "origin/main",
     "repo": "daydreamlive/DEMON",
-    "sha": "dc06b19fd0678e8cd92ddd93e776798f6f272d2e",
-    "synced_at": "2026-06-10T21:52:18+00:00"
+    "sha": "76dac9cb96bf1592f7bc052117b39e6cecb37cb8",
+    "synced_at": "2026-06-11T14:13:25+00:00"
   },
   "ui": {
     "channel_ranges": {

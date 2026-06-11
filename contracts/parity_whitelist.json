@@ -11,11 +11,14 @@
     "set_depth": "Depth is Init-only in TD (immutable while connected); live depth retune is a UX feature we haven't built, not a parity gap.",
     "loop_band": "TD's LoopBuffer does its own seam crossfade locally; the loop band isn't exposed as a TD par. Add an encoder + Loopbandstart/end pars to revisit.",
     "manual_slot_add": "Activation-steering surface (manual slots) not built in TD; the steer_*/man_* knobs would come with it.",
-    "manual_slot_pop": "Activation-steering surface not built in TD; see manual_slot_add."
+    "manual_slot_pop": "Activation-steering surface not built in TD; see manual_slot_add.",
+    "write_audio": "Live audio-write ('play into the model') surface not built in TD yet — needs an input-CHOP capture + write flow. Strong candidate feature for a TD op; revisit deliberately, not as a parity patch."
   },
   "events_ignored": {
     "init_ack": "Server ack of the SessionConfig handshake; only meaningful when the client opts into telemetry_version, which TD does not send. No payload TD acts on.",
-    "manual_slot_count": "Slot-count echo for the activation-steering surface TD doesn't implement; see commands_not_sent.manual_slot_add."
+    "manual_slot_count": "Slot-count echo for the activation-steering surface TD doesn't implement; see commands_not_sent.manual_slot_add.",
+    "audio_written": "Ack for write_audio, which TD doesn't send; see commands_not_sent.write_audio.",
+    "audio_write_failed": "Failure ack for write_audio, which TD doesn't send; see commands_not_sent.write_audio."
   },
   "handshake_not_implemented": {
     "upload_track": "TD streams the wired CHOP / file at Connect; there is no pre-stream upload-only flow, so upload_ok/upload_failed never arrive."
