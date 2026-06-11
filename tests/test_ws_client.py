@@ -303,3 +303,47 @@ def test_socket_writable_true_when_no_sock():
     c = wsc_mod.WSClient("ws://test/")
     c._ws = FakeWS()  # no .sock attribute
     assert c._socket_writable() is True
+
+
+# ---------------------------------------------------------------------------
+# Param coalescing (newest-wins; no backlog to head-of-line-block the pong)
+# ---------------------------------------------------------------------------
+
+def test_send_params_coalesces_newest_wins():
+    c = _make_client()
+    c.send_params("p1")
+    c.send_params("p2")
+    c.send_params("p3")          # only this should ever go out
+    assert c._flush_outbound() is None
+    assert [p for p, _ in c._ws.sent] == ["p3"]
+
+
+def test_discretes_flushed_before_coalesced_params():
+    c = _make_client()
+    c.send_text("d1")            # discrete FIFO
+    c.send_binary(b"d2")
+    c.send_params("p1")          # coalesced slot
+    assert c._flush_outbound() is None
+    # Discretes first (in order), then the single latest params.
+    assert [p for p, _ in c._ws.sent] == ["d1", b"d2", "p1"]
+
+
+def test_params_held_when_not_writable_then_newest_sent():
+    c = _make_client()
+    c._socket_writable = lambda: False
+    c.send_params("p1")
+    assert c._flush_outbound() is None
+    assert c._ws.sent == []                 # nothing went out
+    assert c._latest_params == "p1"         # held, not dropped
+    c.send_params("p2")                     # pacer overwrites with fresher
+    c._socket_writable = lambda: True
+    assert c._flush_outbound() is None
+    assert [p for p, _ in c._ws.sent] == ["p2"]   # only the newest
+    assert c._latest_params is None
+
+
+def test_send_params_rejected_once_closing():
+    c = _make_client()
+    c._closing = True
+    assert c.send_params("p1") is False
+    assert c._latest_params is None

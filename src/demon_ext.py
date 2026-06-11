@@ -348,7 +348,7 @@ def eval_curve_linear(pts: list[tuple[float, float]], t: float) -> float:
 
 # Bump this on every meaningful change so the user can confirm at boot
 # which build is actually loaded. Visible on the "DemonExt initialized" line.
-BUILD_MARKER = "v0.2.17-contract-parity+wsdrain-keepalive-fix"
+BUILD_MARKER = "v0.2.17-contract-parity+wsdrain+paramcoalesce-keepalive-fix"
 
 # Hosted-mode pod failover cap. When a hosted WS opens but never reaches
 # `ready` (1011 keepalive / overloaded pod / etc.), we leave the dead
@@ -1991,7 +1991,11 @@ class DemonExt:
         if w is None:
             return False
         try:
-            return bool(w.send_text(msg))
+            # Coalesced path: params supersede each other, so the WSClient
+            # keeps only the newest unsent one. Prevents a slow-draining
+            # pod from accumulating a params backlog that head-of-line-
+            # blocks the keepalive pong (the 1011 disconnect).
+            return bool(w.send_params(msg))
         except Exception:
             return False
 

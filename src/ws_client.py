@@ -102,6 +102,19 @@ class WSClient:
         self._outbound: "queue.Queue[tuple[int, bytes | str]]" = queue.Queue(
             maxsize=512)
 
+        # Coalesced params slot. The params stream is the keepalive AND the
+        # pod's pacing signal, sent at ~62 Hz — but params SUPERSEDE each
+        # other (only the newest playback_pos + knob values matter). Queuing
+        # them FIFO let a pod that drains slower than 62 Hz accumulate a deep
+        # backlog (observed: 199 messages), which head-of-line-blocks the
+        # PONG behind it in the TCP stream → the pod sees our pong past its
+        # 20 s keepalive window → 1011. So params get ONE slot (newest wins),
+        # drained after the discrete FIFO. At most one params frame ever sits
+        # ahead of a pong. Discrete messages (prompt, enable_lora, audio)
+        # still go FIFO and are never dropped.
+        self._params_lock = threading.Lock()
+        self._latest_params: str | None = None
+
         # Diagnostics (read in the close log).
         self._n_sent = 0
         self._n_recv = 0
@@ -157,6 +170,8 @@ class WSClient:
     def _run(self) -> None:
         self._server_close_code = None
         self._pending_send = None
+        with self._params_lock:
+            self._latest_params = None
         try:
             self._log(f"[ws_client] dialing {self.url}")
             self._ws = websocket.create_connection(self.url, timeout=self._timeout)
@@ -315,6 +330,20 @@ class WSClient:
         return self._enqueue(websocket.ABNF.OPCODE_BINARY, payload,
                              "send_binary")
 
+    def send_params(self, msg: str) -> bool:
+        """Queue a params frame, COALESCED: overwrites any unsent params
+        rather than appending. The newest playback_pos + knob snapshot is
+        the only one worth sending, so a pod draining slower than the
+        ~62 Hz pacer never accumulates a stale backlog that would
+        head-of-line-block the keepalive pong. Drained after the discrete
+        FIFO in _flush_outbound. Enqueue-only (recv thread sends); returns
+        False only once closing."""
+        if self._closing:
+            return False
+        with self._params_lock:
+            self._latest_params = msg
+        return True
+
     def _dispatch_frame(self, opcode: int, data) -> str | None:
         """Handle one received data/close frame. Shared by the main recv
         loop and the between-fragments socket servicing in
@@ -458,6 +487,8 @@ class WSClient:
         busy on first-window generation instead of wedging in a 30 s
         blocking send and getting 1011'd — the disconnect the VST never
         sees (its transport answers pings on an independent thread)."""
+        # 1. Discrete FIFO (prompt / enable_lora / audio): ordered, never
+        #    dropped.
         while True:
             if self._pending_send is not None:
                 opcode, payload = self._pending_send
@@ -465,7 +496,7 @@ class WSClient:
                 try:
                     opcode, payload = self._outbound.get_nowait()
                 except queue.Empty:
-                    return None
+                    break
             if not self._socket_writable():
                 # Defer this frame (don't drop it — could be a prompt /
                 # enable_lora, not a droppable param) and yield to recv.
@@ -498,3 +529,25 @@ class WSClient:
                     self._ws.settimeout(self._RECV_TIMEOUT)
                 except Exception:
                     pass
+
+        # 2. Coalesced params: at most ONE, the newest. Only pulled when
+        #    the socket is write-ready, so it never sits ahead of a pong in
+        #    a stuffed pipe. If not writable we leave it in the slot — the
+        #    pacer keeps overwriting it with fresher values meanwhile.
+        if self._socket_writable():
+            with self._params_lock:
+                params = self._latest_params
+                self._latest_params = None
+            if params is not None:
+                try:
+                    self._ws.settimeout(self._timeout)
+                    self._ws.send(params, opcode=websocket.ABNF.OPCODE_TEXT)
+                    self._n_sent += 1
+                except Exception as e:
+                    return f"send failed: {type(e).__name__}: {e}"
+                finally:
+                    try:
+                        self._ws.settimeout(self._RECV_TIMEOUT)
+                    except Exception:
+                        pass
+        return None
