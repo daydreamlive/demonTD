@@ -2,7 +2,49 @@
 
 All notable changes to demonTD. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.2.17] — 2026-06-11
+
+### Fixed: client-side disconnects + audio bleed-through
+
+The big stability pass. All client-side; the webapp and rtmg-vst stream
+the same pods, so these were demonTD's own bugs (diagnosed by diffing
+against the VST on `origin/master`).
+
+- **No more `1011 keepalive ping timeout` ~40s into a session.** demonTD
+  streamed the `params` keepalive from `_connected`, flooding the pod
+  *during* its 30-40s synchronous VAE encode (before `ready`) and wedging
+  its keepalive. Now silent until `ready` (`_build_params_message`
+  gated on `_saw_ready`), exactly like the VST. The WS stays alive
+  pre-`ready` via the recv loop auto-ponging the pod's server pings.
+- **Surface the server's WS close code + reason** (was always
+  `code=None`) — parses the close frame, so a pod's `1011`/reason is
+  finally visible. This is what made the keepalive diagnosis possible.
+- **Fragment large WS sends** (the ~46 MB source upload) so keepalive
+  pings are answered mid-upload; **coalesce the params slot** (newest
+  wins) so a slow-draining pod can't build a backlog that head-of-line-
+  blocks the pong; **write-readiness gate** so the recv thread never
+  wedges in a blocking send.
+- **Smooth (de-jitter) the reported playhead.** `playback_pos` was the
+  raw `ring.position`, which steps in ~85 ms audio-callback jumps; the
+  pod placed slice leading edges against that stale stair-step, leaving
+  un-patched "source flash" gaps. `LoopBuffer.playhead_estimate()` ramps
+  it between callbacks, **mean-neutral** (zero added latency).
+- **Debounce LoRA-strength changes** (trailing-edge, 300 ms quiet —
+  matches the VST). A strength delta forces a pod weight refit that
+  blocks a decode tick; streaming every fader value during a drag /
+  MIDI / automation gesture was a refit storm that stalled the decode
+  frontier (the source-flash, worse in TD). Now one refit per gesture.
+
+### Changed: defaults + UI match the rtmg-vst
+
+- Prompt A `acoustic deep house hybrid`, Prompt B `daft punk style,
+  beautiful, four to the floor, angelic`; Strength 0.9, Structure 0.8,
+  Timbre 0.3, Seed 0; auto-enable LoRAs `ambient-v1` + `deep_house-v1`
+  @ 0.8 on first catalog load (your saved toggles still win).
+- Quieter textport: handshake/lifecycle play-by-play moved behind Debug
+  Logging; signed session token no longer printed in connect/status.
+
+### Contract-based protocol parity (replaces the regex drift checker)
 
 ### Contract-based protocol parity (replaces the regex drift checker)
 
