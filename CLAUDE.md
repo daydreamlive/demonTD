@@ -82,18 +82,26 @@ silently skips, not fatal).
   `OnTick` and `OnHeartbeat` run off `frame_exec` fallbacks
   (`MaybeTickFromFrame` / `MaybeHeartbeatFromFrame`). Don't assume the
   Timer CHOP works; if you add periodic work, drive it from `frame_exec`.
-- **The pod has no keepalive** — the only thing keeping its WS alive after
-  `ready` is the continuous `params` stream. A dedicated **pacer thread**
-  (`src/params_pacer.py`, ~16 ms cadence) sends it — NOT the frame loop —
-  so TD main-thread hitches can't silence it (a >250 ms hitch used to eat
-  the server's 0.25 s lead and chop the audio). It sends every tick, not
-  just on change; an EMPTY params dict is still the keepalive, and it
-  flows from `_connected` (pre-`ready` traffic is load-bearing — pods
-  1011-idle-close during the initial VAE encode without it). Don't
-  "optimize" it to send-on-change-only, don't gate it on `_saw_ready`,
-  and don't move it back onto OnTick/frame_exec. The main thread
-  supervises it from `_drain_inbound` (restarts it if dead, tears down
-  on a send-fail streak).
+- **The `params` stream is the post-`ready` keepalive — but send NOTHING
+  before `ready`.** A dedicated **pacer thread** (`src/params_pacer.py`,
+  ~16 ms cadence) sends it — NOT the frame loop — so TD main-thread
+  hitches can't silence it (a >250 ms hitch used to eat the server's
+  0.25 s lead and chop the audio). It sends every tick (an EMPTY params
+  dict is still the keepalive), but `_build_params_message` returns
+  `None` until `_saw_ready`: the pod VAE-encodes the source for 30-40 s
+  on its connection handler thread before `ready`, and streaming params
+  into that window floods the blocked pod and wedges its `websockets`
+  keepalive → `1011 keepalive ping timeout` mid-encode. Pre-`ready` the
+  WS stays alive purely by the recv loop auto-ponging the pod's server
+  pings (`ws_client._dispatch_frame`); the rtmg-vst client does exactly
+  this (params only in its Streaming state) and survives the same pods.
+  (This REVERSES an earlier note claiming pre-`ready` traffic prevented a
+  1011-idle-close — that was this same 1011 misdiagnosed; it fired WITH
+  the pre-`ready` stream too.) Don't "optimize" the post-`ready` stream
+  to send-on-change-only, don't move it onto OnTick/frame_exec, and don't
+  start it before `_saw_ready`. The main thread supervises from
+  `_drain_inbound` (restart if dead, tear down on a send-fail streak; the
+  stall watchdog is `_saw_ready`-gated so pre-`ready` silence is fine).
 - **Heartbeat + queue HTTP must stay off the main thread.** The
   `/api/queue/status` poll runs on `src/queue_worker.py`'s thread;
   `leave()` runs on fire-and-forget threads. Synchronous urlopen on the

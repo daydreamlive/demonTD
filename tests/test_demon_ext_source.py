@@ -63,6 +63,21 @@ def test_lora_catalog_captures_trigger_word():
         "— the trigger column is dead and SendPrompt has nothing to inject")
 
 
+def test_params_not_streamed_before_ready():
+    """The params pacer must send NOTHING until `ready`: streaming into
+    the pod's 30-40s synchronous VAE encode wedges its keepalive and
+    1011s the session mid-encode (the rtmg-vst stays silent until
+    Streaming for the same reason). _build_params_message must short out
+    on `_saw_ready`."""
+    body = _method_body("_build_params_message")
+    assert body, "_build_params_message not found in demon_ext.py"
+    # The early-return guard must include _saw_ready (no params pre-ready).
+    m = re.search(r"if not self\._connected[^\n]*:\s*\n\s*return None", body)
+    assert m and "_saw_ready" in m.group(0), (
+        "_build_params_message must return None until self._saw_ready — "
+        "otherwise it floods the encoding pod pre-`ready` and gets 1011'd")
+
+
 def test_build_tox_ships_every_module_demon_ext_imports():
     """Inside TD, demon_ext resolves siblings via mod('<name>'), which
     only works for modules build_tox.py synced into Text DATs. A module

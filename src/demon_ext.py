@@ -348,7 +348,7 @@ def eval_curve_linear(pts: list[tuple[float, float]], t: float) -> float:
 
 # Bump this on every meaningful change so the user can confirm at boot
 # which build is actually loaded. Visible on the "DemonExt initialized" line.
-BUILD_MARKER = "v0.2.17-contract-parity+keepalive-DIAG1"
+BUILD_MARKER = "v0.2.17-contract-parity+noprereadyparams"
 
 # Hosted-mode pod failover cap. When a hosted WS opens but never reaches
 # `ready` (1011 keepalive / overloaded pod / etc.), we leave the dead
@@ -1965,11 +1965,25 @@ class DemonExt:
         where _drain_inbound consumed `_dirty` before OnTick could fold
         it into the snapshot, so the snapshot never saw user edits).
         An EMPTY raw dict still produces a message: that's the
-        keepalive. Gated on `_connected`, NOT `_saw_ready` — the
-        pre-ready params traffic is empirically load-bearing (pods
-        1011-idle-close during the initial VAE encode without it).
+        keepalive once streaming.
+
+        Gated on `_saw_ready` — we send NOTHING until the server's
+        `ready`. The pod VAE-encodes the source for 30-40s on its
+        connection handler thread before `ready`; streaming params into
+        that window floods the blocked pod and wedges its `websockets`
+        keepalive → it 1011s us mid-encode (`keepalive ping timeout`).
+        The rtmg-vst client sends params only in its Streaming state
+        (RTMGProcessor.cpp liveTick), staying silent until `ready`, and
+        survives the same pods. Pre-`ready` the WS is kept alive purely
+        by the recv loop auto-ponging the pod's server keepalive pings
+        (ws_client._dispatch_frame); the app-level "no params = idle"
+        timer only starts once the session is streaming, so post-`ready`
+        the continuous stream remains the keepalive. (This reverses an
+        earlier note that pre-`ready` traffic was load-bearing — that
+        was this same 1011, misdiagnosed: it fired WITH the pre-`ready`
+        stream too.)
         """
-        if not self._connected or self._wsc is None:
+        if not self._connected or self._wsc is None or not self._saw_ready:
             return None
         with self._lock:
             if self._dirty:
